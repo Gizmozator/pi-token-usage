@@ -1,27 +1,36 @@
 /* pi-token-usage — client
  *
- * The whole cube ships in one bootstrap payload (~1-3 KB gzipped), so every
- * filter/aggregate below runs in the browser. No request is made for a filter
+ * The whole cube ships in one bootstrap payload (~50 KB gzipped), so every filter
+ * and aggregate below runs in the browser. No request is made for a filter
  * change; the only network calls are the initial load and an explicit re-index.
+ *
+ * Primary metric is NEW tokens (input + output). cacheRead is deliberately
+ * secondary: it is ~95% of raw volume and would swamp the signal.
  */
 'use strict';
 
 const C = {
-  input:  '#22d3ee',
-  output: '#fbbf24',
+  input:  '#2ee6f0',
+  output: '#ffc45c',
   total:  '#a78bfa',
-  cache:  '#64748b',
-  green:  '#34d399',
-  pink:   '#f472b6',
-  grid:   'rgba(255,255,255,0.055)',
-  tick:   '#7d8ea8',
+  cache:  '#5d6f89',
+  green:  '#4ade9b',
+  pink:   '#ff7ab8',
+  blue:   '#60a5fa',
+  grid:   'rgba(255,255,255,0.05)',
+  tick:   '#7f92ab',
 };
+
+const SERIES = [
+  '#2ee6f0', '#a78bfa', '#ffc45c', '#4ade9b',
+  '#ff7ab8', '#60a5fa', '#f97316', '#c084fc',
+];
 
 Chart.defaults.color = C.tick;
 Chart.defaults.font.family = 'ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace';
 Chart.defaults.font.size = 11;
 Chart.defaults.borderColor = C.grid;
-Chart.defaults.animation.duration = 450;
+Chart.defaults.animation.duration = 500;
 
 let DATA = null;
 const charts = {};
@@ -58,18 +67,19 @@ function weekStart(day) {
 function periodKey(day, gran) {
   if (gran === 'day') return day;
   if (gran === 'week') return weekStart(day);
-  return day.slice(0, 7);                          // month
+  return day.slice(0, 7);
 }
 
+const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 function prettyPeriod(k, gran) {
   if (gran === 'month') {
     const [y, m] = k.split('-');
-    return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Number(m) - 1] + ' ' + y;
+    return MON[Number(m) - 1] + ' ' + y;
   }
   return k;
 }
 
-/* ---------------- filtering ---------------- */
+/* ---------------- filtering / aggregation ---------------- */
 
 function filtered() {
   if (!DATA || !DATA.cube) return [];
@@ -94,51 +104,47 @@ function sumBy(rows, keyFn) {
   return out;
 }
 
+// The headline number: fresh work, excluding cache re-reads.
+const freshOf = (a) => a.input + a.output;
+
 /* ---------------- hero ---------------- */
 
 function renderHero(rows) {
   const t = { input: 0, output: 0, cacheRead: 0, total: 0, msgs: 0 };
   const days = new Set();
   const projs = new Set();
+
   for (const r of rows) {
     t.input += r.i; t.output += r.o; t.cacheRead += r.c; t.total += r.t; t.msgs += r.n;
-    days.add(r.d); projs.add(r.p);
+    if (r.d) days.add(r.d);
+    if (r.p) projs.add(r.p);
   }
+
+  const fresh = t.input + t.output;
+  const activeDays = days.size || 1;
+
+  countUp($('hNew'), fresh, fmtTok);
+  countUp($('hIn'), t.input, fmtTok);
+  countUp($('hOut'), t.output, fmtTok);
+  countUp($('hPerDay'), fresh / activeDays, fmtTok);
+  countUp($('hMsgs'), t.msgs, fmtInt);
+  countUp($('hProj'), projs.size, fmtInt);
+  countUp($('hDays'), days.size, fmtInt);
+  countUp($('hCache'), t.cacheRead, fmtTok);
+
   const denom = t.input + t.cacheRead;
-  const hit = denom > 0 ? (100 * t.cacheRead / denom) : 0;
-
-  const cards = [
-    { k: 'Total tokens', v: t.total, fmt: fmtTok, accent: '#a78bfa', s: fmtInt(t.total) },
-    { k: 'Fresh input', v: t.input, fmt: fmtTok, accent: C.input, s: 'not served from cache' },
-    { k: 'Output', v: t.output, fmt: fmtTok, accent: C.output, s: 'generated' },
-    { k: 'Cache read', v: t.cacheRead, fmt: fmtTok, accent: C.cache, s: 're-read per turn' },
-    { k: 'Cache hit', v: hit, fmt: fmtPct, accent: C.green, s: 'cacheRead ÷ (cacheRead+input)' },
-    { k: 'Active days', v: days.size, fmt: fmtInt, accent: C.pink, s: projs.size + ' project(s)' },
-  ];
-
-  const el = $('hero');
-  if (el.childElementCount !== cards.length) {
-    el.innerHTML = cards.map(() =>
-      '<div class="stat"><div class="k"></div><div class="v">0</div><div class="s"></div></div>').join('');
-  }
-  [...el.children].forEach((c, i) => {
-    const cd = cards[i];
-    c.style.setProperty('--accent', cd.accent);
-    c.querySelector('.k').textContent = cd.k;
-    c.querySelector('.s').textContent = cd.s;
-    countUp(c.querySelector('.v'), cd.v, cd.fmt);
-  });
-
-  const share = t.total > 0 ? (100 * t.cacheRead / t.total) : 0;
-  $('cacheShare').textContent = share.toFixed(1) + '%';
+  $('hCacheSub').textContent = denom > 0
+    ? fmtPct(100 * t.cacheRead / denom) + ' of prompt volume'
+    : '—';
 }
 
 function countUp(node, target, fmt) {
+  if (!node) return;
   const from = Number(node.dataset.v || 0);
   node.dataset.v = target;
   if (from === target) { node.textContent = fmt(target); return; }
 
-  const dur = 600;
+  const dur = 650;
   const t0 = performance.now();
   let raf = 0;
   const step = (now) => {
@@ -149,13 +155,9 @@ function countUp(node, target, fmt) {
   };
   raf = requestAnimationFrame(step);
 
-  // Safety net: requestAnimationFrame is throttled or never fires in background
-  // tabs and headless renders. Without this the number can be left displaying an
-  // interpolated value that is simply wrong.
-  setTimeout(() => {
-    cancelAnimationFrame(raf);
-    node.textContent = fmt(target);
-  }, dur + 120);
+  // rAF is throttled or never fires in background tabs and headless renders;
+  // without this the number can be left showing a wrong interpolated value.
+  setTimeout(() => { cancelAnimationFrame(raf); node.textContent = fmt(target); }, dur + 140);
 }
 
 /* ---------------- main throughput chart ---------------- */
@@ -166,17 +168,38 @@ function renderMain(rows) {
   const labels = keys.map((k) => prettyPeriod(k, state.gran));
 
   const ds = [
-    { label: 'Total', data: keys.map((k) => agg.get(k).total), borderColor: C.total, backgroundColor: 'rgba(167,139,250,0.10)', fill: true, borderWidth: 2, tension: 0.25, pointRadius: 2 },
-    { label: 'Input', data: keys.map((k) => agg.get(k).input), borderColor: C.input, backgroundColor: 'rgba(34,211,238,0.08)', fill: false, borderWidth: 2, tension: 0.25, pointRadius: 2 },
-    { label: 'Output', data: keys.map((k) => agg.get(k).output), borderColor: C.output, backgroundColor: 'rgba(251,191,36,0.08)', fill: false, borderWidth: 2, tension: 0.25, pointRadius: 2 },
+    {
+      label: 'new total',
+      data: keys.map((k) => freshOf(agg.get(k))),
+      borderColor: C.total,
+      backgroundColor: grad('mainChart', 'rgba(167,139,250,0.28)', 'rgba(167,139,250,0.01)'),
+      fill: true, borderWidth: 2.2, tension: 0.3, pointRadius: 0, pointHoverRadius: 4,
+    },
+    {
+      label: 'input',
+      data: keys.map((k) => agg.get(k).input),
+      borderColor: C.input, backgroundColor: 'transparent',
+      fill: false, borderWidth: 2, tension: 0.3, pointRadius: 0, pointHoverRadius: 4,
+    },
+    {
+      label: 'output',
+      data: keys.map((k) => agg.get(k).output),
+      borderColor: C.output, backgroundColor: 'transparent',
+      fill: false, borderWidth: 2, tension: 0.3, pointRadius: 0, pointHoverRadius: 4,
+    },
   ];
+
   if (state.showCache) {
     ds.push({
-      label: 'Cache read', data: keys.map((k) => agg.get(k).cacheRead),
-      borderColor: C.cache, borderDash: [5, 4], borderWidth: 1.5, fill: false, tension: 0.25, pointRadius: 1.5,
+      label: 'cache re-read (secondary)',
+      data: keys.map((k) => agg.get(k).cacheRead),
+      borderColor: C.cache, backgroundColor: 'transparent',
+      borderDash: [6, 5], borderWidth: 1.4, fill: false, tension: 0.3,
+      pointRadius: 0, pointHoverRadius: 3,
     });
   }
 
+  const yType = state.log ? 'logarithmic' : 'linear';
   const cfg = {
     type: 'line',
     data: { labels, datasets: ds },
@@ -184,16 +207,13 @@ function renderMain(rows) {
       responsive: true, maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { labels: { boxWidth: 12, boxHeight: 2, usePointStyle: false } },
-        tooltip: {
-          callbacks: { label: (c) => ' ' + c.dataset.label + ': ' + fmtInt(c.parsed.y) + ' tok' },
-        },
+        legend: { labels: { boxWidth: 14, boxHeight: 3, usePointStyle: false, padding: 16 } },
+        tooltip: { callbacks: { label: (c) => ' ' + c.dataset.label + ': ' + fmtInt(c.parsed.y) } },
       },
       scales: {
-        x: { grid: { color: C.grid }, ticks: { maxRotation: 0, autoSkipPadding: 18 } },
+        x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkipPadding: 20 } },
         y: {
-          type: state.log ? 'logarithmic' : 'linear',
-          beginAtZero: !state.log,
+          type: yType, beginAtZero: !state.log,
           grid: { color: C.grid },
           ticks: { callback: (v) => fmtTok(v) },
         },
@@ -203,47 +223,100 @@ function renderMain(rows) {
 
   if (charts.main) {
     charts.main.data = cfg.data;
-    charts.main.options.scales.y.type = cfg.options.scales.y.type;
-    charts.main.options.scales.y.beginAtZero = cfg.options.scales.y.beginAtZero;
+    charts.main.options.scales.y.type = yType;
+    charts.main.options.scales.y.beginAtZero = !state.log;
     charts.main.update();
   } else {
     charts.main = new Chart($('mainChart'), cfg);
   }
 }
 
-/* ---------------- cache gauge ---------------- */
+// Vertical gradient fill for area charts.
+function grad(canvasId, top, bottom) {
+  const cv = $(canvasId);
+  if (!cv || !cv.getContext) return top;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, 0, cv.clientHeight || 300);
+  g.addColorStop(0, top);
+  g.addColorStop(1, bottom);
+  return g;
+}
 
-function renderGauge(rows) {
-  let cache = 0, input = 0;
-  for (const r of rows) { cache += r.c; input += r.i; }
-  const denom = cache + input;
-  const hit = denom > 0 ? (100 * cache / denom) : 0;
+/* ---------------- stacked area by project ---------------- */
+
+function renderStack(rows) {
+  const byProj = sumBy(rows, (r) => r.p);
+  const ranked = [...byProj.entries()]
+    .map(([p, a]) => [p, freshOf(a)])
+    .sort((a, b) => b[1] - a[1]);
+
+  const TOP = 7;
+  const top = ranked.slice(0, TOP);
+  const rest = ranked.slice(TOP);
+
+  const periods = [...new Set(rows.map((r) => periodKey(r.d, state.gran)))].sort();
+  const idx = new Map(periods.map((p, i) => [p, i]));
+
+  // fresh tokens per (project, period)
+  const cell = new Map();
+  const other = new Array(periods.length).fill(0);
+  const topNames = new Set(top.map((t) => t[0]));
+
+  for (const r of rows) {
+    const fresh = r.i + r.o;
+    const pi = idx.get(periodKey(r.d, state.gran));
+    if (pi === undefined) continue;
+    if (topNames.has(r.p)) {
+      const k = r.p + '|' + pi;
+      cell.set(k, (cell.get(k) || 0) + fresh);
+    } else {
+      other[pi] += fresh;
+    }
+  }
+
+  const ds = top.map(([name], i) => ({
+    label: name,
+    data: periods.map((_, pi) => cell.get(name + '|' + pi) || 0),
+    backgroundColor: hexA(SERIES[i % SERIES.length], 0.55),
+    borderColor: hexA(SERIES[i % SERIES.length], 0.95),
+    borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, pointHoverRadius: 3,
+  }));
+
+  if (rest.length) {
+    ds.push({
+      label: 'other (' + rest.length + ')',
+      data: other,
+      backgroundColor: 'rgba(93,111,137,0.35)',
+      borderColor: 'rgba(93,111,137,0.8)',
+      borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, pointHoverRadius: 3,
+    });
+  }
 
   const cfg = {
-    type: 'doughnut',
-    data: {
-      labels: ['Cache read', 'Fresh input'],
-      datasets: [{
-        data: [cache, input],
-        backgroundColor: [C.green, C.input],
-        borderColor: ['#0a0e14', '#0a0e14'],
-        borderWidth: 2,
-      }],
-    },
+    type: 'line',
+    data: { labels: periods.map((p) => prettyPeriod(p, state.gran)), datasets: ds },
     options: {
-      responsive: true, maintainAspectRatio: false, cutout: '72%',
-      rotation: -120, circumference: 240,
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: { label: (c) => ' ' + c.label + ': ' + fmtInt(c.parsed) } },
+        legend: { labels: { boxWidth: 11, boxHeight: 11, usePointStyle: true, pointStyle: 'rectRounded', padding: 12 } },
+        tooltip: { callbacks: { label: (c) => ' ' + c.dataset.label + ': ' + fmtInt(c.parsed.y) } },
+      },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { maxRotation: 0, autoSkipPadding: 20 } },
+        y: { stacked: true, grid: { color: C.grid }, ticks: { callback: (v) => fmtTok(v) } },
       },
     },
   };
-  if (charts.gauge) { charts.gauge.data = cfg.data; charts.gauge.update(); }
-  else charts.gauge = new Chart($('gauge'), cfg);
 
-  const cv = $('gauge');
-  cv.parentElement.setAttribute('title', 'cache hit ' + hit.toFixed(2) + '%');
+  if (charts.stack) { charts.stack.data = cfg.data; charts.stack.update(); }
+  else charts.stack = new Chart($('stackChart'), cfg);
+}
+
+function hexA(hex, a) {
+  const h = hex.replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
 }
 
 /* ---------------- hour of day ---------------- */
@@ -252,23 +325,26 @@ function renderHours(rows) {
   const buckets = new Array(24).fill(0);
   for (const r of rows) {
     const h = r.h | 0;
-    if (h >= 0 && h < 24) buckets[h] += r.t;
+    if (h >= 0 && h < 24) buckets[h] += r.i + r.o;
   }
   const cfg = {
     type: 'bar',
     data: {
       labels: buckets.map((_, i) => String(i).padStart(2, '0')),
       datasets: [{
-        label: 'Tokens', data: buckets,
-        backgroundColor: buckets.map((v, i) => (i >= 0 && i < 6) ? 'rgba(167,139,250,0.55)' : 'rgba(34,211,238,0.55)'),
-        borderRadius: 3,
+        label: 'new tokens',
+        data: buckets,
+        backgroundColor: buckets.map((_, i) =>
+          (i >= 0 && i < 6) ? 'rgba(167,139,250,0.65)' : 'rgba(46,230,240,0.6)'),
+        borderRadius: 5,
+        borderSkipped: false,
       }],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
-        tooltip: { callbacks: { label: (c) => ' ' + fmtInt(c.parsed.y) + ' tok' } },
+        tooltip: { callbacks: { label: (c) => ' ' + fmtInt(c.parsed.y) } },
       },
       scales: {
         x: { grid: { display: false } },
@@ -283,13 +359,18 @@ function renderHours(rows) {
 /* ---------------- horizontal bars ---------------- */
 
 function renderBars(el, map, color) {
-  const items = [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14);
+  if (!el) return;
+  const items = [...map.entries()].map(([k, a]) => [k, freshOf(a)]).sort((a, b) => b[1] - a[1]).slice(0, 14);
   const max = items.length ? items[0][1] : 1;
+  if (!items.length) { el.innerHTML = '<div class="empty">no data for this filter</div>'; return; }
   el.innerHTML = items.map(([name, val]) => `
     <div class="bar-row">
-      <div class="bar-label"><span class="nm" title="${esc(name)}">${esc(name)}</span><span class="vl">${fmtTok(val)}</span></div>
-      <div class="bar-track"><div class="bar-fill" style="width:${(100 * val / max).toFixed(1)}%;background:${color}"></div></div>
-    </div>`).join('') || '<div class="hint">no data for this filter</div>';
+      <div class="bar-label">
+        <span class="nm" title="${esc(name)}">${esc(name || '(unknown)')}</span>
+        <span class="vl">${fmtTok(val)}</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill" style="width:${(100 * val / max).toFixed(2)}%;background:${color}"></div></div>
+    </div>`).join('');
 }
 
 function esc(s) {
@@ -300,38 +381,50 @@ function esc(s) {
 
 function renderHeatmap(rows) {
   const byDay = new Map();
-  for (const r of rows) byDay.set(r.d, (byDay.get(r.d) || 0) + r.t);
-
-  const days = [...byDay.keys()].filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
-  const cv = $('heatmap');
-  const wrap = cv.parentElement;
-  if (!days.length) {
-    const ctx = cv.getContext('2d');
-    ctx.clearRect(0, 0, cv.width, cv.height);
-    wrap.innerHTML = '<div class="hint">no data in this range</div>';
-    return;
+  for (const r of rows) {
+    const fresh = r.i + r.o;
+    if (fresh > 0) byDay.set(r.d, (byDay.get(r.d) || 0) + fresh);
   }
 
-  const cell = 13, gap = 3, left = 30, top = 18;
+  const cv = $('heatmap');
+  const wrap = cv.parentElement;
+  const tip = $('heatTip');
+
+  const days = [...byDay.keys()].filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+  const ctx = cv.getContext('2d');
+
+  if (!days.length) {
+    cv.width = 10; cv.height = 10;
+    tip.hidden = true;
+    if (!wrap.querySelector('.empty')) {
+      const d = document.createElement('div');
+      d.className = 'empty';
+      d.textContent = 'no new tokens in this range';
+      wrap.appendChild(d);
+    }
+    return;
+  }
+  const empty = wrap.querySelector('.empty');
+  if (empty) empty.remove();
+
+  const cell = 15, gap = 4, left = 34, top = 22;
   const start = new Date(days[0] + 'T00:00:00Z');
-  const end = new Date(days[days.length - 1] + 'T00:00:00Z');
   const startOff = (start.getUTCDay() + 6) % 7;
   const weeks = Math.floor((days.length + startOff + 6) / 7);
 
-  cv.width = left + weeks * (cell + gap) + 8;
-  cv.height = top + 7 * (cell + gap) + 6;
+  cv.width = left + weeks * (cell + gap) + 10;
+  cv.height = top + 7 * (cell + gap) + 8;
 
-  const ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, cv.width, cv.height);
 
-  const vals = [...byDay.values()].filter((v) => v > 0);
-  const maxLog = vals.length ? Math.log(Math.max(...vals) + 1) : 1;
+  const vals = [...byDay.values()];
+  const maxLog = Math.log(Math.max(...vals) + 1);
 
-  const labels = ['Mon', '', 'Wed', '', 'Fri', '', 'Sun'];
-  ctx.font = '9px ui-monospace, monospace';
-  ctx.fillStyle = '#55657d';
+  ctx.font = '9.5px ui-monospace, monospace';
+  ctx.fillStyle = '#5d6f89';
+  const wd = ['Mon', '', 'Wed', '', 'Fri', '', 'Sun'];
   for (let r = 0; r < 7; r++) {
-    if (labels[r]) ctx.fillText(labels[r], 0, top + r * (cell + gap) + cell - 3);
+    if (wd[r]) ctx.fillText(wd[r], 0, top + r * (cell + gap) + cell - 3);
   }
 
   const cells = [];
@@ -344,74 +437,42 @@ function renderHeatmap(rows) {
       const v = byDay.get(key) || 0;
 
       ctx.beginPath();
-      ctx.roundRect(x, y, cell, cell, 2.5);
+      ctx.roundRect(x, y, cell, cell, 3.5);
       if (v > 0) {
         const t = Math.log(v + 1) / maxLog;
-        const a = 0.16 + 0.84 * t;
-        ctx.fillStyle = `rgba(34, 211, 238, ${a.toFixed(3)})`;
+        // cyan -> violet as intensity rises
+        const c1 = [46, 230, 240], c2 = [167, 139, 250];
+        const mix = c1.map((a, i) => Math.round(a + (c2[i] - a) * t));
+        ctx.fillStyle = `rgba(${mix[0]}, ${mix[1]}, ${mix[2]}, ${(0.22 + 0.78 * t).toFixed(3)})`;
       } else {
-        ctx.fillStyle = 'rgba(255,255,255,0.035)';
+        ctx.fillStyle = 'rgba(255,255,255,0.03)';
       }
       ctx.fill();
       cells.push({ x, y, key, v });
     }
   }
 
-  // month markers
-  ctx.fillStyle = '#55657d';
+  ctx.fillStyle = '#5d6f89';
   let lastMonth = -1;
   for (let w = 0; w < weeks; w++) {
     const d = new Date(start.getTime() + (w * 7 - startOff) * 86400000);
     if (d.getUTCMonth() !== lastMonth) {
       lastMonth = d.getUTCMonth();
-      ctx.fillText(
-        ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][lastMonth],
-        left + w * (cell + gap), 10
-      );
+      ctx.fillText(MON[lastMonth], left + w * (cell + gap), 12);
     }
   }
 
-  const tip = $('heatTip');
   cv.onmousemove = (e) => {
     const rect = cv.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const c = cells.find((c) => mx >= c.x && mx <= c.x + cell && my >= c.y && my <= c.y + cell);
     if (!c) { tip.hidden = true; return; }
     tip.hidden = false;
-    tip.textContent = `${c.key}  ${c.v > 0 ? fmtInt(c.v) + ' tok' : 'no activity'}`;
-    tip.style.left = Math.min(c.x + cell + 8, rect.width - 170) + 'px';
-    tip.style.top = (c.y + 14) + 'px';
+    tip.textContent = c.key + '  ' + (c.v > 0 ? fmtInt(c.v) + ' new tok' : 'no activity');
+    tip.style.left = Math.min(c.x + cell + 10, Math.max(0, rect.width - 180)) + 'px';
+    tip.style.top = (c.y + 16) + 'px';
   };
   cv.onmouseleave = () => { tip.hidden = true; };
-}
-
-/* ---------------- sessions table ---------------- */
-
-function renderSessions(rows) {
-  const keys = new Set(rows.map((r) => r.SessionID || r.session_id));
-  const ids = new Set(rows.map((r) => r.p + '|' + r.k));
-  const sess = (DATA.sessions || []).filter((s) =>
-    (!state.project || s.project === state.project) &&
-    (!state.kind || s.kind === state.kind)
-  );
-  const keep = new Set();
-  for (const r of rows) {
-    if (state.model && r.m !== state.model) continue;
-    keep.add(r.p + '|' + r.k);
-  }
-  const list = sess.filter((s) => keep.has(s.project + '|' + s.kind)).slice(0, 300);
-
-  const tb = $('sessTable').querySelector('tbody');
-  tb.innerHTML = list.map((s) => `
-    <tr>
-      <td>${esc(s.project)}</td>
-      <td><span class="tag ${esc(s.kind)}">${esc(s.kind)}</span></td>
-      <td>${esc(s.agent || '—')}</td>
-      <td>${esc((s.started || '').replace('T', ' ').slice(0, 16))}</td>
-      <td class="num">${fmtInt(s.msgs)}</td>
-      <td class="num">${fmtTok(s.total)}</td>
-    </tr>`).join('');
-  $('sessNote').textContent = `${list.length} session(s) · ${ids.size} project/type groups`;
 }
 
 /* ---------------- render all ---------------- */
@@ -420,12 +481,11 @@ function render() {
   const rows = filtered();
   renderHero(rows);
   renderMain(rows);
-  renderGauge(rows);
-  renderHeatmap(rows);
-  renderBars($('projBars'), sumBy(rows, (r) => r.p), 'linear-gradient(90deg,#22d3ee,#0891b2)');
+  renderStack(rows);
+  renderBars($('projBars'), sumBy(rows, (r) => r.p), 'linear-gradient(90deg,#2ee6f0,#0891b2)');
   renderBars($('modelBars'), sumBy(rows, (r) => r.m || '(unknown)'), 'linear-gradient(90deg,#a78bfa,#7c3aed)');
+  renderHeatmap(rows);
   renderHours(rows);
-  renderSessions(rows);
   writeURL();
 }
 
@@ -451,6 +511,7 @@ function readURL() {
 
 function fillSelect(id, values, allLabel) {
   const sel = $(id);
+  if (!sel) return;
   const cur = sel.value;
   sel.innerHTML = `<option value="">${allLabel}</option>` +
     values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
@@ -469,7 +530,7 @@ function syncControls() {
 }
 
 function bind() {
-  const on = (id, ev, fn) => $(id).addEventListener(ev, fn);
+  const on = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); };
 
   on('fProject', 'change', (e) => { state.project = e.target.value; render(); });
   on('fModel', 'change', (e) => { state.model = e.target.value; render(); });
@@ -503,7 +564,7 @@ async function doIndex(full) {
   $('freshness').textContent = full ? 'full rebuild running…' : 're-indexing…';
   try {
     const r = await fetch('/api/index' + (full ? '?full=true' : ''), { method: 'POST' });
-    if (!r.ok) throw new Error((await r.text()).trim() || r.status);
+    if (!r.ok) throw new Error((await r.text()).trim() || ('HTTP ' + r.status));
     await boot(true);
   } catch (err) {
     $('freshness').textContent = 'index failed: ' + err.message;
@@ -514,27 +575,26 @@ async function doIndex(full) {
 
 async function boot(preserveFilters) {
   const r = await fetch('/api/bootstrap');
-  if (!r.ok) throw new Error('bootstrap failed: ' + r.status);
+  if (!r.ok) throw new Error('bootstrap failed: HTTP ' + r.status);
   DATA = await r.json();
 
-  if (!preserveFilters) { readURL(); }
+  if (!preserveFilters) readURL();
 
-  fillSelect('fProject', DATA.facets.projects || [], 'All projects');
-  fillSelect('fModel', DATA.facets.models || [], 'All models');
-  fillSelect('fKind', DATA.facets.kinds || [], 'All types');
+  fillSelect('fProject', DATA.facets.projects || [], 'all');
+  fillSelect('fModel', DATA.facets.models || [], 'all');
+  fillSelect('fKind', DATA.facets.kinds || [], 'all');
   syncControls();
 
   const idx = DATA.index || {};
   const f = $('freshness');
   f.textContent = `${fmtInt(idx.files_total)} files · ${fmtInt(idx.events_total)} events · ` +
-    (idx.refreshed ? `re-indexed in ${idx.refresh_ms} ms` : 'up to date') +
-    (idx.last_index ? ` · last index ${idx.last_index.replace('T', ' ').slice(0, 19)}Z` : '');
+    (idx.refreshed ? `re-indexed in ${idx.refresh_ms} ms` : 'up to date');
   f.classList.add('live');
 
-  $('srcPath').textContent = (idx.sessions_root || '~/.pi/agent/sessions');
   const t = DATA.totals || {};
-  $('footStats').textContent = `${fmtInt(t.total_tokens)} tokens · ${fmtInt(t.msgs)} counted messages · ` +
-    `${t.projects} projects · ${t.days} active days · cache hit ${fmtPct(t.cache_hit)}`;
+  $('footStats').textContent =
+    `${fmtInt(t.total_tokens)} raw tokens · ${fmtInt(t.msgs)} counted messages · ` +
+    `${t.projects} projects · ${t.days} active days`;
 
   render();
 }

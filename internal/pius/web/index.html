@@ -4,134 +4,120 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pi-token-usage</title>
-<link rel="stylesheet href="style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📊</text></svg>">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>▚</text></svg>">
 </head>
 <body>
-<div class="scanlines" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
 
 <header class="topbar">
   <div class="brand">
-    <span class="logo">▚</span>
-    <div>
-      <h1>pi-token-usage</h1>
-      <div class="sub" id="freshness">loading…</div>
+    <div class="logo"><span></span><span></span><span></span><span></span></div>
+    <div class="brand-txt">
+      <h1>pi<span class="dim">·</span>tokens</h1>
+      <div class="sub" id="freshness">booting…</div>
     </div>
   </div>
   <div class="top-actions">
-    <button id="btnReindex" class="btn" title="Incremental re-index (r)">↻ Re-index</button>
-    <button id="btnFull" class="btn ghost" title="Full rebuild — clears offsets and re-parses everything">⟲ Full rebuild</button>
+    <button id="btnReindex" class="btn" title="Incremental re-index (r)">↻ re-index</button>
+    <button id="btnFull" class="btn ghost" title="Wipe offsets and re-parse everything">⟲ full rebuild</button>
   </div>
 </header>
 
 <section class="filters">
-  <div class="filter-group">
-    <label for="fProject">Project</label>
-    <select id="fProject"><option value="">All projects</option></select>
-  </div>
-  <div class="filter-group">
-    <label for="fModel">Model</label>
-    <select id="fModel"><option value="">All models</option></select>
-  </div>
-  <div class="filter-group">
-    <label for="fKind">Type</label>
-    <select id="fKind">
-      <option value="">All types</option>
-    </select>
-  </div>
-  <div class="filter-group">
-    <label for="fGran">Granularity</label>
+  <div class="fg"><label for="fProject">project</label><select id="fProject"><option value="">all</option></select></div>
+  <div class="fg"><label for="fModel">model</label><select id="fModel"><option value="">all</option></select></div>
+  <div class="fg"><label for="fKind">type</label><select id="fKind"><option value="">all</option></select></div>
+  <div class="fg"><label for="fGran">grain</label>
     <select id="fGran">
-      <option value="day">Day</option>
-      <option value="week">Week</option>
-      <option value="month" selected>Month</option>
+      <option value="day">day</option>
+      <option value="week">week</option>
+      <option value="month" selected>month</option>
     </select>
   </div>
-  <div class="filter-group">
-    <label for="fFrom">From</label>
-    <input type="date" id="fFrom">
-  </div>
-  <div class="filter-group">
-    <label for="fTo">To</label>
-    <input type="date" id="fTo">
-  </div>
-  <div class="filter-group toggles">
-    <label class="chk"><input type="checkbox" id="fCache"> <span>cache read line</span></label>
-    <label class="chk"><input type="checkbox" id="fLog"> <span>log scale</span></label>
-  </div>
-  <button id="btnClear" class="btn tiny ghost">clear</button>
+  <div class="fg"><label for="fFrom">from</label><input type="date" id="fFrom"></div>
+  <div class="fg"><label for="fTo">to</label><input type="date" id="fTo"></div>
+  <div class="fg grow"></div>
+  <label class="chk"><input type="checkbox" id="fCache"><span>overlay cache re-read</span></label>
+  <label class="chk"><input type="checkbox" id="fLog"><span>log scale</span></label>
+  <button id="btnClear" class="btn tiny ghost">reset</button>
 </section>
 
 <main>
-  <section class="hero" id="hero"></section>
+  <!-- headline: NEW tokens, not cache -->
+  <section class="hero">
+    <div class="hero-main">
+      <div class="hero-k">new tokens</div>
+      <div class="hero-v" id="hNew">0</div>
+      <div class="hero-s">fresh work · input + output, excluding cache re-reads</div>
+      <div class="hero-split">
+        <div class="split">
+          <div class="sdot in"></div><div class="sl">input</div><div class="sv" id="hIn">0</div>
+        </div>
+        <div class="split">
+          <div class="sdot out"></div><div class="sl">output</div><div class="sv" id="hOut">0</div>
+        </div>
+      </div>
+    </div>
+    <div class="hero-side">
+      <div class="mini"><div class="mk">per active day</div><div class="mv" id="hPerDay">0</div></div>
+      <div class="mini"><div class="mk">messages</div><div class="mv" id="hMsgs">0</div></div>
+      <div class="mini"><div class="mk">projects</div><div class="mv" id="hProj">0</div></div>
+      <div class="mini"><div class="mk">active days</div><div class="mv" id="hDays">0</div></div>
+      <div class="mini muted"><div class="mk">cache re-read</div><div class="mv" id="hCache">0</div><div class="ms" id="hCacheSub"></div></div>
+    </div>
+  </section>
 
   <section class="panel wide">
-    <div class="panel-head">
-      <h2>Token throughput</h2>
-      <div class="legend-note">
-        cache read is <span id="cacheShare">—</span> of all tokens, so it is a
-        separate dashed series rather than part of the stack.
-      </div>
+    <div class="ph">
+      <h2>new tokens over time</h2>
+      <div class="note">input + output. cache re-read is off by default — it is ~95% of raw volume and dwarfs the signal.</div>
     </div>
     <div class="chart-wrap tall"><canvas id="mainChart"></canvas></div>
   </section>
 
-  <section class="panel">
-    <div class="panel-head"><h2>Cache efficiency</h2></div>
-    <div class="gauge-wrap"><canvas id="gauge"></canvas></div>
-    <p class="hint">cacheRead ÷ (cacheRead + input). High means the prompt cache is
-      absorbing almost all re-reading.</p>
-  </section>
-
   <section class="panel wide">
-    <div class="panel-head">
-      <h2>Daily activity</h2>
-      <div class="legend-note">log-scaled intensity · local time</div>
+    <div class="ph">
+      <h2>where it went</h2>
+      <div class="note">stacked new tokens by project</div>
     </div>
-    <div class="heatmap-wrap">
-      <canvas id="heatmap"></canvas>
-      <div id="heatTip" class="heat-tip" hidden></div>
-    </div>
+    <div class="chart-wrap"><canvas id="stackChart"></canvas></div>
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Projects</h2></div>
+    <div class="ph"><h2>projects</h2></div>
     <div class="bars" id="projBars"></div>
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Models</h2></div>
+    <div class="ph"><h2>models</h2></div>
     <div class="bars" id="modelBars"></div>
   </section>
 
   <section class="panel wide">
-    <div class="panel-head">
-      <h2>Hour of day</h2>
-      <div class="legend-note">when the tokens actually get spent</div>
+    <div class="ph">
+      <h2>daily rhythm</h2>
+      <div class="note">new tokens per day · log-scaled intensity · local time</div>
     </div>
-    <div class="chart-wrap"><canvas id="hourChart"></canvas></div>
+    <div class="heat-wrap">
+      <canvas id="heatmap"></canvas>
+      <div id="heatTip" class="tip" hidden></div>
+    </div>
   </section>
 
   <section class="panel wide">
-    <div class="panel-head">
-      <h2>Sessions</h2>
-      <div class="legend-note" id="sessNote"></div>
+    <div class="ph">
+      <h2>hour of day</h2>
+      <div class="note">new tokens by local hour</div>
     </div>
-    <div class="table-wrap">
-      <table id="sessTable">
-        <thead>
-          <tr><th>Project</th><th>Type</th><th>Agent</th><th>Started</th><th class="num">Msgs</th><th class="num">Tokens</th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
+    <div class="chart-wrap"><canvas id="hourChart"></canvas></div>
   </section>
 </main>
 
 <footer>
-  <span>data source: <code id="srcPath">~/.pi/agent/sessions</code></span>
-  <span class="dot">·</span>
   <span id="footStats"></span>
+  <span class="dot">·</span>
+  <span>cost is 0 — all models run locally</span>
 </footer>
 
 <script src="vendor/chart.umd.js"></script>
