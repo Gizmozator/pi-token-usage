@@ -1,0 +1,17 @@
+# build output
+/pitokens
+/dist/
+
+# local database
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# vendored UI assets are committed intentionally (offline single-binary), so no ignore there
+
+# editor / OS cruft
+*.swp
+.idea/
+.vscode/
+.DS_Store
