@@ -1,1 +1,140 @@
-<!doctype html><title>placeholder</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-token-usage</title>
+<link rel="stylesheet href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📊</text></svg>">
+</head>
+<body>
+<div class="scanlines" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">▚</span>
+    <div>
+      <h1>pi-token-usage</h1>
+      <div class="sub" id="freshness">loading…</div>
+    </div>
+  </div>
+  <div class="top-actions">
+    <button id="btnReindex" class="btn" title="Incremental re-index (r)">↻ Re-index</button>
+    <button id="btnFull" class="btn ghost" title="Full rebuild — clears offsets and re-parses everything">⟲ Full rebuild</button>
+  </div>
+</header>
+
+<section class="filters">
+  <div class="filter-group">
+    <label for="fProject">Project</label>
+    <select id="fProject"><option value="">All projects</option></select>
+  </div>
+  <div class="filter-group">
+    <label for="fModel">Model</label>
+    <select id="fModel"><option value="">All models</option></select>
+  </div>
+  <div class="filter-group">
+    <label for="fKind">Type</label>
+    <select id="fKind">
+      <option value="">All types</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <label for="fGran">Granularity</label>
+    <select id="fGran">
+      <option value="day">Day</option>
+      <option value="week">Week</option>
+      <option value="month" selected>Month</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <label for="fFrom">From</label>
+    <input type="date" id="fFrom">
+  </div>
+  <div class="filter-group">
+    <label for="fTo">To</label>
+    <input type="date" id="fTo">
+  </div>
+  <div class="filter-group toggles">
+    <label class="chk"><input type="checkbox" id="fCache"> <span>cache read line</span></label>
+    <label class="chk"><input type="checkbox" id="fLog"> <span>log scale</span></label>
+  </div>
+  <button id="btnClear" class="btn tiny ghost">clear</button>
+</section>
+
+<main>
+  <section class="hero" id="hero"></section>
+
+  <section class="panel wide">
+    <div class="panel-head">
+      <h2>Token throughput</h2>
+      <div class="legend-note">
+        cache read is <span id="cacheShare">—</span> of all tokens, so it is a
+        separate dashed series rather than part of the stack.
+      </div>
+    </div>
+    <div class="chart-wrap tall"><canvas id="mainChart"></canvas></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Cache efficiency</h2></div>
+    <div class="gauge-wrap"><canvas id="gauge"></canvas></div>
+    <p class="hint">cacheRead ÷ (cacheRead + input). High means the prompt cache is
+      absorbing almost all re-reading.</p>
+  </section>
+
+  <section class="panel wide">
+    <div class="panel-head">
+      <h2>Daily activity</h2>
+      <div class="legend-note">log-scaled intensity · local time</div>
+    </div>
+    <div class="heatmap-wrap">
+      <canvas id="heatmap"></canvas>
+      <div id="heatTip" class="heat-tip" hidden></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Projects</h2></div>
+    <div class="bars" id="projBars"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Models</h2></div>
+    <div class="bars" id="modelBars"></div>
+  </section>
+
+  <section class="panel wide">
+    <div class="panel-head">
+      <h2>Hour of day</h2>
+      <div class="legend-note">when the tokens actually get spent</div>
+    </div>
+    <div class="chart-wrap"><canvas id="hourChart"></canvas></div>
+  </section>
+
+  <section class="panel wide">
+    <div class="panel-head">
+      <h2>Sessions</h2>
+      <div class="legend-note" id="sessNote"></div>
+    </div>
+    <div class="table-wrap">
+      <table id="sessTable">
+        <thead>
+          <tr><th>Project</th><th>Type</th><th>Agent</th><th>Started</th><th class="num">Msgs</th><th class="num">Tokens</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>data source: <code id="srcPath">~/.pi/agent/sessions</code></span>
+  <span class="dot">·</span>
+  <span id="footStats"></span>
+</footer>
+
+<script src="vendor/chart.umd.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

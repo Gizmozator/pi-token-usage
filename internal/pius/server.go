@@ -1,6 +1,7 @@
 package pius
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,7 +46,7 @@ func (srv *Server) Handler() http.Handler {
 		fileServer := http.FileServer(http.FS(srv.webFS))
 		mux.Handle("GET /", noCache(fileServer))
 	}
-	return logMiddleware(mux)
+	return logMiddleware(gzipMiddleware(mux))
 }
 
 // Bootstrap is the single payload the UI needs. Everything after this is
@@ -95,7 +97,7 @@ func (srv *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	sess, err := srv.store.Sessions(1000)
+	sess, err := srv.store.Sessions(400)
 	if err != nil {
 		httpError(w, err)
 		return
@@ -120,7 +122,7 @@ func (srv *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		Sessions: sess,
 		Facets:   facetsFrom(cube),
 	}
-	writeJSON(w, bs)
+	writeJSON(w, r, bs)
 }
 
 // maybeRefresh does the cheap staleness check and indexes only changed files.
@@ -158,7 +160,7 @@ func (srv *Server) handleTotals(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	writeJSON(w, t)
+	writeJSON(w, r, t)
 }
 
 func (srv *Server) handleCube(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +169,7 @@ func (srv *Server) handleCube(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	writeJSON(w, c)
+	writeJSON(w, r, c)
 }
 
 func (srv *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +184,7 @@ func (srv *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	writeJSON(w, s)
+	writeJSON(w, r, s)
 }
 
 func (srv *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +204,7 @@ func (srv *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	srv.mu.Unlock()
 
-	writeJSON(w, map[string]any{
+	writeJSON(w, r, map[string]any{
 		"indexing":       idx,
 		"last_index":     srv.store.GetMeta("last_index"),
 		"last_refresh":   last.UTC().Format(time.RFC3339),
@@ -242,7 +244,7 @@ func (srv *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res.ElapsedMS = time.Since(start).Milliseconds()
-	writeJSON(w, res)
+	writeJSON(w, r, res)
 }
 
 func facetsFrom(cube []CubeRow) Facets {
@@ -290,12 +292,53 @@ func sortStrings(s []string) {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
+func writeJSON(w http.ResponseWriter, r *http.Request, v any) {
+	// Compact encoding: pretty-printing roughly doubles the payload, and the cube
+	// is the one thing the browser always downloads in full. Compression is
+	// handled by gzipMiddleware so it is applied exactly once.
+	buf, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
+	_, _ = w.Write(buf)
+}
+
+// gzipResponseWriter compresses transparently for handlers we do not control
+// (the static file server), while keeping Content-Length out of the way.
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz *gzip.Writer
+}
+
+func (g *gzipResponseWriter) WriteHeader(code int) {
+	// Content-Encoding is set by the middleware before dispatch, because a handler
+	// that only calls Write() never reaches this override - setting it here would
+	// silently ship gzip bytes with no header and break JSON parsing client-side.
+	g.Header().Del("Content-Length")
+	g.ResponseWriter.WriteHeader(code)
+}
+
+func (g *gzipResponseWriter) Write(p []byte) (int, error) {
+	return g.gz.Write(p)
+}
+
+func gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Declare the encoding up front: by the time any handler writes, the header
+		// must already be present.
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Add("Vary", "Accept-Encoding")
+		gz := gzip.NewWriter(w)
+		next.ServeHTTP(&gzipResponseWriter{ResponseWriter: w, gz: gz}, r)
+		_ = gz.Close()
+	})
 }
 
 func httpError(w http.ResponseWriter, err error) {
