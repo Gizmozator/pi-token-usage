@@ -13,6 +13,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// Embed the tz database: the scratch image has no /usr/share/zoneinfo, so
+	// without this TZ=Europe/Helsinki silently fails and every day bucket lands
+	// in UTC - a multi-hour shift that quietly corrupts all daily numbers.
+	_ "time/tzdata"
 
 	"github.com/gizmoz/pi-token-usage/internal/pius"
 )

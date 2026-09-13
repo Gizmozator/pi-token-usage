@@ -1,0 +1,92 @@
+IMAGE    ?= pi-token-usage:latest
+NAME     ?= pitokens
+SESSIONS ?= $(HOME)/.pi/agent/sessions
+DB_VOL   ?= pitokens-data
+PORT     ?= 7777
+TZ       ?= $(shell timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)
+BIN      ?= pitokens
+
+.DEFAULT_GOAL := help
+
+# ------------------------------------------------------------------ local
+
+build: ## build the static binary
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) ./cmd/pitokens
+
+test: ## run unit tests
+	go test ./...
+
+vet: ## go vet
+	go vet ./...
+
+index: build ## incremental index into the local db
+	PI_SESSIONS_DIR=$(SESSIONS) ./$(BIN) index
+
+index-full: build ## wipe and re-parse everything
+	PI_SESSIONS_DIR=$(SESSIONS) ./$(BIN) index --full
+
+run: build ## serve locally (http://127.0.0.1:$(PORT))
+	PI_SESSIONS_DIR=$(SESSIONS) PITOKENS_ADDR=127.0.0.1:$(PORT) ./$(BIN) serve
+
+report: build ## text report, e.g. make report BY=project
+	PI_SESSIONS_DIR=$(SESSIONS) ./$(BIN) report -by $(or $(BY),month)
+
+clean: ## remove build artifacts
+	rm -f $(BIN)
+
+# ------------------------------------------------------------------ docker
+
+docker-build: ## build the container image
+	docker build -t $(IMAGE) .
+
+docker-up: docker-build ## start with correct mounts (sessions read-only, db in a volume)
+	-docker rm -f $(NAME) >/dev/null 2>&1
+	docker run -d --name $(NAME) \
+	  -p 127.0.0.1:$(PORT):7777 \
+	  -v "$(SESSIONS):/sessions:ro" \
+	  -v $(DB_VOL):/data \
+	  -e TZ=$(TZ) \
+	  -e PI_SESSIONS_DIR=/sessions \
+	  -e PITOKENS_DB=/data/db/index.db \
+	  -e PITOKENS_ADDR=0.0.0.0:7777 \
+	  --read-only --tmpfs /tmp \
+	  $(IMAGE)
+	@echo "→ http://127.0.0.1:$(PORT)   (tz=$(TZ))"
+
+docker-down: ## stop the container
+	docker stop $(NAME)
+
+docker-restart: ## restart the container
+	docker restart $(NAME)
+
+docker-logs: ## follow container logs
+	docker logs -f $(NAME)
+
+docker-reindex: ## incremental re-index inside the container
+	docker exec $(NAME) /pitokens index
+
+docker-rebuild-index: ## full re-index inside the container (clears offsets)
+	docker exec $(NAME) /pitokens index --full
+
+docker-status: ## show index/table stats
+	docker exec $(NAME) /pitokens healthcheck && \
+	docker exec $(NAME) /pitokens report -by month | tail -12
+
+docker-clean: ## remove container AND the database volume
+	-docker rm -f $(NAME) >/dev/null 2>&1
+	-docker volume rm $(DB_VOL) >/dev/null 2>&1
+
+docker-shell: ## run an arbitrary CLI subcommand, e.g. make docker-shell CMD="report -by project"
+	docker run --rm -it \
+	  -v "$(SESSIONS):/sessions:ro" \
+	  -v $(DB_VOL):/data \
+	  -e TZ=$(TZ) -e PI_SESSIONS_DIR=/sessions -e PITOKENS_DB=/data/db/index.db \
+	  --entrypoint /pitokens $(IMAGE) $(or $(CMD),report)
+
+help: ## show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
+
+.PHONY: build test vet index index-full run report clean \
+        docker-build docker-up docker-down docker-restart docker-logs \
+        docker-reindex docker-rebuild-index docker-status docker-clean docker-shell help
