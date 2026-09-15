@@ -100,7 +100,13 @@ type Store struct {
 
 // Open opens (creating if needed) the database at path.
 func Open(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)", path)
+	// temp_store=MEMORY is not a performance tweak, it is what keeps the container
+	// alive: the facts rollup is an INSERT...SELECT with a GROUP BY, which needs a
+	// temp file when temp_store is FILE. The scratch image ships no /tmp, and a
+	// restarted container's tmpfs is not writable by uid 65534, so the sort fails
+	// with "disk I/O error (6410)" (SQLITE_IOERR_ROLLBACK_ATOMIC) and the whole
+	// index run dies. The rollup is ~1.3k groups, so keeping it in RAM is free.
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=temp_store(MEMORY)", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -120,9 +126,79 @@ func Open(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	return s.repairUnknownEvents()
 }
+
+// repairUnknownEvents heals the rows left behind by tail parses that ran before
+// the parser seeded session identity from the file header: those events were
+// written with an empty session_id and project and showed up as "(unknown)" in
+// the UI.
+//
+// The columns are not patched in place - after the fact we no longer know which
+// session each row belonged to. Instead the affected events are dropped along with
+// their file offsets, so the next index pass re-reads those files from byte 0 and
+// attributes them properly. Runs once (guarded by a meta flag) because the parser
+// can no longer produce such rows.
+func (s *Store) repairUnknownEvents() error {
+	if s.GetMeta(repairUnknownKey) != "" {
+		return nil
+	}
+
+	rows, err := s.db.Query(
+		`SELECT DISTINCT source_path FROM usage_events WHERE session_id = '' OR project = ''`)
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return err
+		}
+		paths = append(paths, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, p := range paths {
+		if _, err := tx.Exec(`DELETE FROM usage_events WHERE source_path = ?`, p); err != nil {
+			tx.Rollback()
+			return err
+		}
+		// Drop the dedupe keys and the resume offset too: without the latter the
+		// file would never be re-read from the top.
+		if _, err := tx.Exec(`DELETE FROM seen_msg WHERE source_path = ?`, p); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM files WHERE path = ?`, p); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	// Synthetic rows created when a parse produced no session id.
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE id LIKE 'path:%'`); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.SetMeta(repairUnknownKey, time.Now().UTC().Format(time.RFC3339))
+}
+
+const repairUnknownKey = "repaired_unknown_events_v1"
 
 // FileState is the recorded index state for one session file.
 type FileState struct {
@@ -201,6 +277,15 @@ func (s *Store) StoreFile(tx *sql.Tx, res *ParseResult, size, mtimeNS int64) err
 	defer dup.Close()
 
 	for _, ev := range res.Events {
+		// Events are built during the parse. If the header had not been seen by the
+		// time an event was created, stamp the identity we now know so no row is
+		// ever written with an empty session_id or project.
+		if ev.SessionID == "" {
+			ev.SessionID = res.Session.ID
+		}
+		if ev.Project == "" {
+			ev.Project = res.Session.Project
+		}
 		if ev.MsgID != "" {
 			var one int
 			err := dup.QueryRow(ev.MsgID, ev.Total, res.Session.Path).Scan(&one)

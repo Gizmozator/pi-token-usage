@@ -457,3 +457,177 @@ func TestParseTSVariants(t *testing.T) {
 		t.Error("garbage timestamp should be zero, not panic")
 	}
 }
+
+// ---------------------------------------------------------------- resume identity
+
+const sessInfo = `{"type":"session_info","name":"worker"}`
+
+var usageMsg2 = strings.Replace(usageMsg, `"id":"m1"`, `"id":"m2"`, 1)
+
+// A resumed (tail) parse starts *after* the `session` header record, so identity
+// has to be recovered from the top of the file. Without that, every tailed event
+// lands with an empty session_id and project - the UI's "(unknown)" bucket.
+func TestResumeSeedsProjectAndSessionID(t *testing.T) {
+	content := sessHdr + "\n" + sessInfo + "\n" + usageMsg + "\n"
+	p := tmpFile(t, content)
+
+	cold, err := ParseFile(p, 0, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cold.Session.Project != "proj" || cold.Session.ID != "s1" {
+		t.Fatalf("cold parse identity: project=%q id=%q", cold.Session.Project, cold.Session.ID)
+	}
+
+	// Resume with the header behind us.
+	res, err := ParseFile(p, int64(len(sessHdr)+1), time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Events) != 1 {
+		t.Fatalf("events=%d want 1", len(res.Events))
+	}
+	ev := res.Events[0]
+	if ev.Project != "proj" {
+		t.Fatalf("tail-parsed project=%q want %q (empty renders as unknown)", ev.Project, "proj")
+	}
+	if ev.SessionID != "s1" {
+		t.Fatalf("tail-parsed session_id=%q want %q", ev.SessionID, "s1")
+	}
+	if res.Session.Agent != "worker" {
+		t.Fatalf("agent=%q want %q", res.Session.Agent, "worker")
+	}
+}
+
+// Resuming deep into the file (the common case: a long session keeps growing) must
+// still carry identity, and must not re-read or double-count earlier records.
+func TestResumeDeepInFileKeepsIdentityWithoutRereading(t *testing.T) {
+	content := sessHdr + "\n" + sessInfo + "\n" + usageMsg + "\n" + usageMsg2 + "\n"
+	p := tmpFile(t, content)
+	off := int64(len(sessHdr) + 1 + len(sessInfo) + 1 + len(usageMsg) + 1)
+
+	res, err := ParseFile(p, off, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Events) != 1 {
+		t.Fatalf("events=%d want 1 (only bytes past the offset may be counted)", len(res.Events))
+	}
+	if res.Events[0].MsgID != "m2" {
+		t.Fatalf("msg_id=%q want m2", res.Events[0].MsgID)
+	}
+	if res.Events[0].Project != "proj" || res.Events[0].SessionID != "s1" {
+		t.Fatalf("identity lost on deep resume: project=%q session_id=%q",
+			res.Events[0].Project, res.Events[0].SessionID)
+	}
+	if res.BytesScanned > int64(len(usageMsg2)+1) {
+		t.Fatalf("bytes scanned=%d, must not re-read the header region", res.BytesScanned)
+	}
+}
+
+// A file with no session header at all must not make the resume scan walk the
+// whole file looking for one.
+func TestHeaderScanIsBoundedWhenNoHeaderExists(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		b.WriteString(usageMsg2 + "\n")
+	}
+	p := tmpFile(t, b.String())
+
+	res, err := ParseFile(p, int64(len(usageMsg2)+1), time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.BytesScanned > int64(200*(len(usageMsg2)+1)) {
+		t.Fatalf("bytes scanned=%d exceeds file content", res.BytesScanned)
+	}
+	if got := len(res.Events); got != 199 {
+		t.Fatalf("events=%d want 199", got)
+	}
+}
+
+// ---------------------------------------------------------------- self-healing
+
+// The pre-fix parser wrote tail events with empty session_id/project. Reopening
+// the database must drop those rows *and their resume offsets* so the next index
+// pass re-reads the files from byte 0.
+func TestRepairUnknownEventsForcesReparse(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const src = "/sessions/--home-u-proj--/a.jsonl"
+	mustExec(t, s, `INSERT INTO usage_events (session_id, source_path, msg_id, day, project, kind, total)
+		VALUES ('', ?, 'm9', '2026-01-02', '', 'main', 99)`, src)
+	mustExec(t, s, `INSERT INTO seen_msg (msg_id, tok, source_path) VALUES ('m9', 99, ?)`, src)
+	mustExec(t, s, `INSERT INTO files (path, size, mtime_ns, offset, indexed_at) VALUES (?, 100, 1, 100, 'x')`, src)
+	mustExec(t, s, `INSERT INTO sessions (id, cwd, project, kind) VALUES (?, '', '', 'main')`, "path:"+src)
+	// Pretend this database predates the fix.
+	mustExec(t, s, `DELETE FROM meta WHERE key = ?`, repairUnknownKey)
+	s.Close()
+
+	repaired, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repaired.Close()
+
+	if n := countRows(t, repaired, "usage_events"); n != 0 {
+		t.Fatalf("unknown events after repair=%d want 0", n)
+	}
+	if n := countRows(t, repaired, "seen_msg"); n != 0 {
+		t.Fatalf("stale dedupe keys after repair=%d want 0", n)
+	}
+	if n := countRows(t, repaired, "files"); n != 0 {
+		t.Fatalf("resume offsets survived repair=%d want 0 (file must be re-parsed)", n)
+	}
+	if n := countRows(t, repaired, "sessions"); n != 0 {
+		t.Fatalf("synthetic session rows after repair=%d want 0", n)
+	}
+	if repaired.GetMeta(repairUnknownKey) == "" {
+		t.Fatal("repair flag not recorded; migration would rerun on every open")
+	}
+
+	// Idempotent: a third open must be a no-op, not an error.
+	again, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if n := countRows(t, again, "usage_events"); n != 0 {
+		t.Fatalf("events after second repair=%d want 0", n)
+	}
+}
+
+func mustExec(t *testing.T, s *Store, q string, args ...any) {
+	t.Helper()
+	if _, err := s.db.Exec(q, args...); err != nil {
+		t.Fatalf("exec %q: %v", q, err)
+	}
+}
+
+func countRows(t *testing.T, s *Store, table string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+// The scratch image ships no writable /tmp, and a restarted container's tmpfs is
+// not usable by uid 65534. The facts rollup is an INSERT...SELECT with a GROUP
+// BY, which with temp_store=FILE needs a temp file and dies with
+// "disk I/O error (6410)" (SQLITE_IOERR_ROLLBACK_ATOMIC). Pin it to MEMORY.
+func TestTempStoreIsMemory(t *testing.T) {
+	s := newTestStore(t)
+	var v int
+	if err := s.db.QueryRow(`PRAGMA temp_store`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != 2 { // 0=DEFAULT 1=FILE 2=MEMORY
+		t.Fatalf("temp_store=%d want 2 (MEMORY)", v)
+	}
+}

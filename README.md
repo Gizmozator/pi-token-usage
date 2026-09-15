@@ -110,6 +110,23 @@ These are the traps in the session data. If you fork this design, keep them.
 7. **A torn trailing write is normal** — pi appends while you read. Never commit an
    offset past an incomplete line; stop before it and re-read next pass.
 
+8. **A resume offset points *past* the session header.** The `session` record that
+   carries `id` and `cwd` is line 1, so a tail parse never sees it and every event
+   it emits lands with an empty `session_id` and `project` — the UI's
+   `(unknown)` bucket, plus session rows that never aggregate. Resumed parses
+   must seed identity from the top of the file first (bounded scan, ~2 lines).
+   `Open()` also self-heals databases written before this fix: it drops the
+   unattributed events *and their file offsets* so those files re-parse from 0.
+
+9. **A restarted `scratch` container has no usable temp dir.** The facts rollup is
+   an `INSERT ... SELECT` with a `GROUP BY`, which with the default
+   `temp_store=FILE` spills to a temp file. `scratch` has no `/tmp`, and after
+   `docker restart` the tmpfs is not writable by uid 65534, so the sort fails
+   with `disk I/O error (6410)` (`SQLITE_IOERR_ROLLBACK_ATOMIC`) and the index
+   run — and therefore the container — dies. Fresh containers start fine, so this
+   only bites on restart. `temp_store=MEMORY` in the DSN removes the dependency;
+   the rollup is ~1.3k groups, so it costs nothing.
+
 ## CLI
 
 ```

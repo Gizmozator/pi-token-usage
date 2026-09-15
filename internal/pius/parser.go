@@ -1,6 +1,7 @@
 package pius
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -164,7 +165,13 @@ func ParseFile(path string, offset int64, loc *time.Location) (*ParseResult, err
 	if offset >= st.Size() {
 		return res, nil
 	}
+	// A resumed pass starts *after* the `session` header record, so the session
+	// id and cwd are not among the bytes we are about to read. Seed them from the
+	// top of the file first, otherwise every event added on a tail pass lands with
+	// an empty session_id and project - which the UI renders as "(unknown)" until
+	// someone forces a full re-parse.
 	if offset > 0 {
+		seedHeader(f, res)
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
 			return nil, err
 		}
@@ -224,6 +231,17 @@ func ParseFile(path string, offset int64, loc *time.Location) (*ParseResult, err
 // consume folds one raw record into the parse result.
 func (res *ParseResult) consume(rec *rawRecord) {
 	switch rec.Type {
+	case "session", "session_info":
+		res.seedMeta(rec)
+	case "message":
+		res.addMessage(rec)
+	}
+}
+
+// seedMeta folds the session-identifying records into the parse result and
+// reports whether everything we look for is now present.
+func (res *ParseResult) seedMeta(rec *rawRecord) bool {
+	switch rec.Type {
 	case "session":
 		if res.Session.ID == "" {
 			res.Session.ID = rec.ID
@@ -235,8 +253,37 @@ func (res *ParseResult) consume(rec *rawRecord) {
 		if res.Session.Agent == "" {
 			res.Session.Agent = rec.Name
 		}
-	case "message":
-		res.addMessage(rec)
+	}
+	return res.Session.ID != "" && res.Session.CWD != "" && res.Session.Agent != ""
+}
+
+const (
+	// headerScanMaxLines bounds the resume header scan. Real headers are one or
+	// two records; the cap only exists so a file with no header at all cannot make
+	// us read the whole thing on every resume.
+	headerScanMaxLines = 32
+	// headerScanMaxBytes hard-caps the bytes touched while scanning for the header.
+	headerScanMaxBytes = 256 * 1024
+)
+
+// seedHeader recovers session identity from the top of an already-open file
+// without emitting any events. The caller re-seeks afterwards.
+func seedHeader(f *os.File, res *ParseResult) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+	r := bufio.NewReader(io.LimitReader(f, headerScanMaxBytes))
+	for i := 0; i < headerScanMaxLines; i++ {
+		line, err := r.ReadString('\n')
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			var rec rawRecord
+			if json.Unmarshal([]byte(trimmed), &rec) == nil && res.seedMeta(&rec) {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
 	}
 }
 
