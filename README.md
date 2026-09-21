@@ -1,9 +1,11 @@
 # pi-token-usage
 
-Local dashboard for token usage by the [pi](https://pi.dev) coding agent — and
-[opencode](https://opencode.ai), whose tokens are indexed alongside pi's and can
-be filtered per source. Parses `~/.pi/agent/sessions` plus opencode's SQLite db
-into one index and charts it per day / month / project / model / source.
+Local dashboard for token usage by the [pi](https://pi.dev) coding agent — plus
+[opencode](https://opencode.ai) and
+[ocr](https://github.com/alibaba/open-code-review), whose tokens are indexed
+alongside pi's and can be filtered per source. Parses `~/.pi/agent/sessions`,
+opencode's SQLite db and ocr's session transcripts into one index and charts it
+per day / month / project / model / source.
 
 Single static Go binary, Chart.js UI, no external services. All data stays on your
 machine and the server binds to loopback only.
@@ -39,6 +41,21 @@ appends), so re-runs cost milliseconds.
   the pi index.
 - opencode sessions map onto the existing dimensions: `directory` → project,
   `parent_id` → subagent kind, `modelID`/`providerID` → model/provider.
+
+## ocr (open-code-review) tokens
+
+ocr writes each review session as a JSONL transcript under
+`~/.opencodereview/sessions/<flattened-repo>/<uuid>.jsonl`. The `llm_response`
+records carry per-call usage (`prompt_tokens`/`completion_tokens`/
+`cache_read_tokens`/`cache_write_tokens`) and are indexed as `source='ocr'`
+through the same append-only offset machinery as pi's own logs — the other
+record types (`llm_request` payloads, `tool_call`, errors) are skipped.
+The provider name is read from the `provider` key of
+`~/.opencodereview/config.json` (the API keys in that file are never read).
+
+- Override with `OCR_SESSIONS_DIR=/path` or `-ocr PATH` on `index`/`serve`;
+  `OCR_SESSIONS_DIR=off` disables it.
+- A missing ocr directory is skipped silently — no ocr, no noise.
 
 ## Docker
 

@@ -16,6 +16,7 @@ import (
 const (
 	SourcePi       = "pi"
 	SourceOpenCode = "opencode"
+	SourceOCR      = "ocr"
 )
 
 // Kind classifies a session file by its position in the sessions tree.
@@ -186,9 +187,47 @@ func ParseFile(path string, offset int64, loc *time.Location) (*ParseResult, err
 		}
 	}
 
-	data, err := io.ReadAll(f)
+	next, scanned, err := scanJSONL(f, offset, func(body []byte, complete bool) (bool, error) {
+		var rec rawRecord
+		if jerr := json.Unmarshal(body, &rec); jerr != nil {
+			if !complete {
+				// Torn tail: stop before it so the next pass retries.
+				return true, nil
+			}
+			// Complete but unparseable: skip this line, keep the file moving.
+			res.Malformed++
+			return false, nil
+		}
+		res.consume(&rec)
+		return false, nil
+	})
 	if err != nil {
 		return nil, err
+	}
+	res.NextOffset = next
+	res.BytesScanned = scanned
+
+	if res.Session.Project == "" && res.Session.CWD != "" {
+		res.Session.Project = projectFromCWD(res.Session.CWD)
+	}
+	return res, nil
+}
+
+// scanJSONL walks newline-delimited records from f's current position, where
+// offset is the byte position of the first byte being read. Every non-empty
+// line is delivered to consume along with whether it was newline-terminated.
+//
+// The offset contract is shared by every envelope parser (pi, ocr) because it
+// is the dangerous part: the returned offset is the end of the last delivered
+// record and must include terminators. A torn trailing write (unterminated AND
+// unparseable) is never committed - consume returns stop=true and the offset
+// halts before it so the next pass retries. A complete-but-unparseable line is
+// the consumer's problem: it counts the line malformed and the scan advances
+// past it so one bad record cannot stall the file.
+func scanJSONL(f *os.File, offset int64, consume func(body []byte, complete bool) (stop bool, err error)) (nextOffset, bytesScanned int64, err error) {
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return offset, 0, err
 	}
 
 	cursor := offset
@@ -209,32 +248,20 @@ func ParseFile(path string, offset int64, loc *time.Location) (*ParseResult, err
 
 		trimmed := bytes.TrimSpace(body)
 		if len(trimmed) > 0 {
-			var rec rawRecord
-			if jerr := json.Unmarshal(trimmed, &rec); jerr != nil {
-				if !complete {
-					// Torn tail: stop before it so the next pass retries.
-					break
-				}
-				// Complete but unparseable: skip this line, keep the file moving.
-				res.Malformed++
-				data = data[advance:]
-				cursor += int64(advance)
-				res.NextOffset = cursor
-				continue
+			stop, cerr := consume(trimmed, complete)
+			if cerr != nil {
+				return cursor, bytesScanned, cerr
 			}
-			res.consume(&rec)
+			if stop {
+				return cursor, bytesScanned, nil
+			}
 		}
 
 		data = data[advance:]
 		cursor += int64(advance)
-		res.NextOffset = cursor
-		res.BytesScanned += int64(advance)
+		bytesScanned += int64(advance)
 	}
-
-	if res.Session.Project == "" && res.Session.CWD != "" {
-		res.Session.Project = projectFromCWD(res.Session.CWD)
-	}
-	return res, nil
+	return cursor, bytesScanned, nil
 }
 
 // consume folds one raw record into the parse result.

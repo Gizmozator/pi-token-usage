@@ -61,9 +61,16 @@ type IndexOptions struct {
 	// OpenCodeDB is the path to opencode's SQLite database. Empty, "off", or a
 	// missing file means opencode contributes nothing to the index.
 	OpenCodeDB string
-	Full       bool
-	OnDone     func(Progress)
+	// OCRRoot is the open-code-review sessions directory
+	// (~/.opencodereview/sessions). Empty or missing means no ocr tokens.
+	OCRRoot string
+	Full    bool
+	OnDone  func(Progress)
 }
+
+// parseFunc parses one session file from a byte offset. Both the pi envelope
+// (ParseFile) and the ocr envelope (ParseOCRFile) satisfy it.
+type parseFunc func(path string, offset int64, loc *time.Location) (*ParseResult, error)
 
 // Index synchronises the database with the sessions directory.
 //
@@ -80,6 +87,24 @@ func Index(s *Store, opts IndexOptions) (*IndexResult, error) {
 		return nil, err
 	}
 
+	// ocr session transcripts share the JSONL offset machinery; only the
+	// envelope parser differs. A missing ocr root is not an error.
+	var ocrFiles []string
+	var ocrProvider string
+	if opts.OCRRoot != "" {
+		if _, statErr := os.Stat(opts.OCRRoot); statErr == nil {
+			ocrFiles, err = Discover(opts.OCRRoot)
+			if err != nil {
+				log.Printf("ocr sessions scan skipped: %v", err)
+				ocrFiles = nil
+			}
+		}
+		ocrProvider = OCRProviderName(opts.OCRRoot)
+	}
+	ocrParse := func(p string, off int64, loc *time.Location) (*ParseResult, error) {
+		return ParseOCRFile(p, off, loc, ocrProvider)
+	}
+
 	res := &IndexResult{}
 	if opts.Full {
 		if err := fullReset(s); err != nil {
@@ -87,73 +112,15 @@ func Index(s *Store, opts IndexOptions) (*IndexResult, error) {
 		}
 	}
 
+	total := len(files) + len(ocrFiles)
 	for _, path := range files {
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
-			continue
-		}
-		size := info.Size()
-		mtime := info.ModTime().UnixNano()
-
-		state, err := s.GetFile(path)
-		if err != nil {
+		if err := indexOneFile(s, path, ParseFile, opts.Full, res, total, opts.OnDone); err != nil {
 			return nil, err
 		}
-
-		offset := int64(0)
-		needFull := opts.Full
-
-		switch {
-		case !state.Exists:
-			needFull = true
-		case size == state.Size:
-			// Unchanged. This is the common case for ~all historical files.
-			res.FilesSkipped++
-			continue
-		case size > state.Size && state.Offset > 0 && state.Offset <= size:
-			offset = state.Offset
-		default:
-			// Shrank, or no usable offset: re-read from the top.
-			needFull = true
-		}
-
-		parsed, err := ParseFile(path, offset, locOrUTC)
-		if err != nil {
-			// Unreadable file: record nothing, keep prior state intact.
-			continue
-		}
-
-		tx, err := s.db.Begin()
-		if err != nil {
+	}
+	for _, path := range ocrFiles {
+		if err := indexOneFile(s, path, ocrParse, opts.Full, res, total, opts.OnDone); err != nil {
 			return nil, err
-		}
-		if needFull && state.Exists {
-			if err := s.ResetFile(tx, path); err != nil {
-				tx.Rollback()
-				return nil, err
-			}
-		}
-		if err := s.StoreFile(tx, parsed, size, mtime); err != nil {
-			tx.Rollback()
-			return nil, err
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-
-		res.FilesScanned++
-		res.EventsAdded += len(parsed.Events) - parsed.Skipped
-		res.EventsSkipped += parsed.Skipped
-		res.BytesRead += parsed.BytesScanned
-
-		if opts.OnDone != nil {
-			opts.OnDone(Progress{
-				FilesTotal:   len(files),
-				FilesDone:    res.FilesScanned + res.FilesSkipped,
-				FilesChanged: res.FilesScanned,
-				EventsAdded:  res.EventsAdded,
-				BytesRead:    res.BytesRead,
-			})
 		}
 	}
 
@@ -176,39 +143,119 @@ func Index(s *Store, opts IndexOptions) (*IndexResult, error) {
 	return res, nil
 }
 
+// indexOneFile applies the size-triggered parse/store cycle to a single file
+// with the given parser. Parse errors skip the file (prior state intact);
+// storage errors are fatal to the run.
+func indexOneFile(s *Store, path string, parse parseFunc, full bool, res *IndexResult, filesTotal int, onDone func(Progress)) error {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return nil
+	}
+	size := info.Size()
+	mtime := info.ModTime().UnixNano()
+
+	state, err := s.GetFile(path)
+	if err != nil {
+		return err
+	}
+
+	offset := int64(0)
+	needFull := full
+
+	switch {
+	case !state.Exists:
+		needFull = true
+	case size == state.Size:
+		// Unchanged. This is the common case for ~all historical files.
+		res.FilesSkipped++
+		return nil
+	case size > state.Size && state.Offset > 0 && state.Offset <= size:
+		offset = state.Offset
+	default:
+		// Shrank, or no usable offset: re-read from the top.
+		needFull = true
+	}
+
+	parsed, err := parse(path, offset, locOrUTC)
+	if err != nil {
+		// Unreadable file: record nothing, keep prior state intact.
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if needFull && state.Exists {
+		if err := s.ResetFile(tx, path); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	if err := s.StoreFile(tx, parsed, size, mtime); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	res.FilesScanned++
+	res.EventsAdded += len(parsed.Events) - parsed.Skipped
+	res.EventsSkipped += parsed.Skipped
+	res.BytesRead += parsed.BytesScanned
+
+	if onDone != nil {
+		onDone(Progress{
+			FilesTotal:   filesTotal,
+			FilesDone:    res.FilesScanned + res.FilesSkipped,
+			FilesChanged: res.FilesScanned,
+			EventsAdded:  res.EventsAdded,
+			BytesRead:    res.BytesRead,
+		})
+	}
+	return nil
+}
+
 // EnsureFresh performs a cheap staleness check and indexes only what changed.
 // A full stat pass over the whole tree costs a few milliseconds, so this is safe
 // to call on every page load.
-func EnsureFresh(s *Store, root, openCodeDB string) (*IndexResult, bool, error) {
-	changed, err := anyChanged(s, root, openCodeDB)
+func EnsureFresh(s *Store, root, openCodeDB, ocrRoot string) (*IndexResult, bool, error) {
+	changed, err := anyChanged(s, root, openCodeDB, ocrRoot)
 	if err != nil {
 		return nil, false, err
 	}
 	if !changed {
 		return &IndexResult{}, false, nil
 	}
-	r, err := Index(s, IndexOptions{Root: root, OpenCodeDB: openCodeDB})
+	r, err := Index(s, IndexOptions{Root: root, OpenCodeDB: openCodeDB, OCRRoot: ocrRoot})
 	return r, true, err
 }
 
 // anyChanged reports whether any file differs in size from its recorded state,
 // or the opencode database has unconsumed rows.
-func anyChanged(s *Store, root, openCodeDB string) (bool, error) {
-	files, err := Discover(root)
-	if err != nil {
-		return false, err
+func anyChanged(s *Store, root, openCodeDB, ocrRoot string) (bool, error) {
+	roots := []string{root}
+	if ocrRoot != "" {
+		roots = append(roots, ocrRoot)
 	}
-	for _, p := range files {
-		info, err := os.Stat(p)
-		if err != nil || info.IsDir() {
-			continue
-		}
-		st, err := s.GetFile(p)
+	for _, r := range roots {
+		files, err := Discover(r)
 		if err != nil {
-			return true, err
+			return false, err
 		}
-		if !st.Exists || st.Size != info.Size() {
-			return true, nil
+		for _, p := range files {
+			info, err := os.Stat(p)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			st, err := s.GetFile(p)
+			if err != nil {
+				return true, err
+			}
+			if !st.Exists || st.Size != info.Size() {
+				return true, nil
+			}
 		}
 	}
 	if openCodeDB != "" {

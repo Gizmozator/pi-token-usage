@@ -2,10 +2,15 @@ IMAGE    ?= pi-token-usage:latest
 NAME     ?= pitokens
 SESSIONS ?= $(HOME)/.pi/agent/sessions
 OPENCODE ?= $(HOME)/.local/share/opencode
+OCR_HOME ?= $(HOME)/.opencodereview
 # Only mount the opencode dir when its db exists, so docker doesn't create an
 # empty root-owned directory on machines without opencode.
 OPENCODE_MOUNT := $(shell [ -f "$(OPENCODE)/opencode.db" ] && echo "-v $(OPENCODE):/opencode:ro")
 OPENCODE_ENV   := $(shell [ -f "$(OPENCODE)/opencode.db" ] && echo "-e OPENCODE_DB=/opencode/opencode.db")
+# ocr: mount the whole ~/.opencodereview (sessions + config.json for the
+# provider name) read-only, only when the sessions dir exists.
+OCR_MOUNT    := $(shell [ -d "$(OCR_HOME)/sessions" ] && echo "-v $(OCR_HOME):/ocr:ro")
+OCR_ENV      := $(shell [ -d "$(OCR_HOME)/sessions" ] && echo "-e OCR_SESSIONS_DIR=/ocr/sessions")
 DB_VOL   ?= pitokens-data
 PORT     ?= 7777
 TZ       ?= $(shell timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)
@@ -50,10 +55,12 @@ docker-up: docker-build ## start with correct mounts (sessions read-only, db in 
 	  -p 127.0.0.1:$(PORT):7777 \
 	  -v "$(SESSIONS):/sessions:ro" \
 	  $(OPENCODE_MOUNT) \
+	  $(OCR_MOUNT) \
 	  -v $(DB_VOL):/data \
 	  -e TZ=$(TZ) \
 	  -e PI_SESSIONS_DIR=/sessions \
 	  $(OPENCODE_ENV) \
+	  $(OCR_ENV) \
 	  -e PITOKENS_DB=/data/db/index.db \
 	  -e PITOKENS_ADDR=0.0.0.0:7777 \
 	  --read-only --tmpfs /tmp \
@@ -87,8 +94,9 @@ docker-shell: ## run an arbitrary CLI subcommand, e.g. make docker-shell CMD="re
 	docker run --rm -it \
 	  -v "$(SESSIONS):/sessions:ro" \
 	  $(OPENCODE_MOUNT) \
+	  $(OCR_MOUNT) \
 	  -v $(DB_VOL):/data \
-	  -e TZ=$(TZ) -e PI_SESSIONS_DIR=/sessions $(OPENCODE_ENV) -e PITOKENS_DB=/data/db/index.db \
+	  -e TZ=$(TZ) -e PI_SESSIONS_DIR=/sessions $(OPENCODE_ENV) $(OCR_ENV) -e PITOKENS_DB=/data/db/index.db \
 	  --entrypoint /pitokens $(IMAGE) $(or $(CMD),report)
 
 help: ## show this help

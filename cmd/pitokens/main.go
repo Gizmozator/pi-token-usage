@@ -27,6 +27,7 @@ const (
 	envAddr     = "PITOKENS_ADDR"
 	envTZ       = "TZ"
 	envOpenCode = "OPENCODE_DB"
+	envOCR      = "OCR_SESSIONS_DIR"
 )
 
 func main() {
@@ -67,6 +68,7 @@ Commands:
   index      Parse ~/.pi/agent/sessions into the SQLite index
                -full          wipe and re-parse everything
                -opencode PATH opencode db to ingest alongside pi
+               -ocr PATH      ocr sessions dir to ingest alongside pi
   serve      Serve the web UI and API
   report     Print text tables (no browser needed)
                -by  day | month | project | model | provider | kind | source
@@ -78,6 +80,8 @@ Environment:
   PITOKENS_ADDR     listen address  (default 127.0.0.1:7777)
   OPENCODE_DB       opencode db     (default ~/.local/share/opencode/opencode.db,
                                    'off' disables ingesting opencode tokens)
+  OCR_SESSIONS_DIR  ocr sessions   (default ~/.opencodereview/sessions,
+                                   'off' disables ingesting open-code-review tokens)
   TZ                day bucketing   (default system local zone)
 `)
 }
@@ -88,6 +92,7 @@ type config struct {
 	addr     string
 	tz       string
 	opencode string
+	ocr      string
 }
 
 func loadConfig() (config, error) {
@@ -104,6 +109,10 @@ func loadConfig() (config, error) {
 	// OPENCODE_DB=off opts out entirely; an unset value keeps the default path.
 	if strings.EqualFold(strings.TrimSpace(c.opencode), "off") {
 		c.opencode = ""
+	}
+	c.ocr = firstNonEmpty(os.Getenv(envOCR), filepath.Join(home, ".opencodereview", "sessions"))
+	if strings.EqualFold(strings.TrimSpace(c.ocr), "off") {
+		c.ocr = ""
 	}
 	return c, nil
 }
@@ -148,6 +157,7 @@ func cmdIndex(argv []string) int {
 	sessions := fs.String("sessions", "", "sessions root")
 	dbPath := fs.String("db", "", "database path")
 	openCode := fs.String("opencode", "", "opencode db path ('off' to disable)")
+	ocr := fs.String("ocr", "", "ocr sessions dir ('off' to disable)")
 	_ = fs.Parse(argv)
 
 	cfg, err := loadConfig()
@@ -166,6 +176,12 @@ func cmdIndex(argv []string) int {
 			cfg.opencode = ""
 		}
 	}
+	if *ocr != "" {
+		cfg.ocr = strings.TrimSpace(*ocr)
+		if strings.EqualFold(cfg.ocr, "off") {
+			cfg.ocr = ""
+		}
+	}
 	applyZone(cfg.tz)
 
 	st, err := openDB(cfg.db)
@@ -178,7 +194,10 @@ func cmdIndex(argv []string) int {
 	if cfg.opencode != "" {
 		fmt.Printf("opencode db:    %s\n", cfg.opencode)
 	}
-	res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode, Full: *full})
+	if cfg.ocr != "" {
+		fmt.Printf("ocr sessions:   %s\n", cfg.ocr)
+	}
+	res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode, OCRRoot: cfg.ocr, Full: *full})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -208,6 +227,7 @@ func cmdServe(argv []string) int {
 	sessions := fs.String("sessions", "", "sessions root")
 	dbPath := fs.String("db", "", "database path")
 	openCode := fs.String("opencode", "", "opencode db path ('off' to disable)")
+	ocr := fs.String("ocr", "", "ocr sessions dir ('off' to disable)")
 	noIndex := fs.Bool("no-index", false, "skip the startup index")
 	_ = fs.Parse(argv)
 
@@ -230,6 +250,12 @@ func cmdServe(argv []string) int {
 			cfg.opencode = ""
 		}
 	}
+	if *ocr != "" {
+		cfg.ocr = strings.TrimSpace(*ocr)
+		if strings.EqualFold(cfg.ocr, "off") {
+			cfg.ocr = ""
+		}
+	}
 	applyZone(cfg.tz)
 
 	st, err := openDB(cfg.db)
@@ -240,7 +266,7 @@ func cmdServe(argv []string) int {
 
 	if !*noIndex {
 		fmt.Printf("cold index of %s ...\n", cfg.sessions)
-		res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode})
+		res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode, OCRRoot: cfg.ocr})
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -248,7 +274,7 @@ func cmdServe(argv []string) int {
 			res.FilesScanned, res.FilesSkipped, res.ElapsedMS)
 	}
 
-	srv := pius.NewServer(st, cfg.sessions, cfg.opencode, pius.WebFS())
+	srv := pius.NewServer(st, cfg.sessions, cfg.opencode, cfg.ocr, pius.WebFS())
 	httpSrv := &http.Server{
 		Addr:              cfg.addr,
 		Handler:           srv.Handler(),
