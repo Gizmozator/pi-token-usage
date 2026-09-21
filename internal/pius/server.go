@@ -16,8 +16,9 @@ import (
 
 // Server exposes the index over HTTP and serves the embedded UI.
 type Server struct {
-	store        *Store
-	root         string
+	store       *Store
+	root        string
+	openCodeDB  string
 	webFS       fs.FS
 	mu          sync.Mutex
 	indexing    bool
@@ -26,9 +27,9 @@ type Server struct {
 	refreshErr  string
 }
 
-// NewServer builds the HTTP server.
-func NewServer(s *Store, sessionsRoot string, web fs.FS) *Server {
-	return &Server{store: s, root: sessionsRoot, webFS: web}
+// NewServer builds the HTTP server. openCodeDB may be "" to exclude opencode.
+func NewServer(s *Store, sessionsRoot, openCodeDB string, web fs.FS) *Server {
+	return &Server{store: s, root: sessionsRoot, openCodeDB: openCodeDB, webFS: web}
 }
 
 // Handler returns the routed mux.
@@ -53,17 +54,17 @@ func (srv *Server) Handler() http.Handler {
 // client-side filtering: the cube is a couple of KB, so round-tripping per filter
 // change would cost more than the data itself.
 type Bootstrap struct {
-	GeneratedAt string      `json:"generated_at"`
-	Index       IndexInfo   `json:"index"`
-	Totals      Totals      `json:"totals"`
-	Cube        []CubeRow   `json:"cube"`
+	GeneratedAt string       `json:"generated_at"`
+	Index       IndexInfo    `json:"index"`
+	Totals      Totals       `json:"totals"`
+	Cube        []CubeRow    `json:"cube"`
 	Sessions    []SessionRow `json:"sessions"`
-	Facets      Facets      `json:"facets"`
+	Facets      Facets       `json:"facets"`
 }
 
 // IndexInfo describes index freshness.
 type IndexInfo struct {
-	LastIndex     string `json:"last_index"`
+	LastIndex   string `json:"last_index"`
 	Refreshed   bool   `json:"refreshed"`
 	RefreshMS   int64  `json:"refresh_ms"`
 	FilesTotal  int64  `json:"files_total"`
@@ -77,6 +78,7 @@ type Facets struct {
 	Models    []string `json:"models"`
 	Providers []string `json:"providers"`
 	Kinds     []string `json:"kinds"`
+	Sources   []string `json:"sources"`
 	Days      []string `json:"days"`
 }
 
@@ -111,7 +113,7 @@ func (srv *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	bs := Bootstrap{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Index: IndexInfo{
-			LastIndex:     srv.store.GetMeta("last_index"),
+			LastIndex:   srv.store.GetMeta("last_index"),
 			Refreshed:   refreshed,
 			RefreshMS:   ms,
 			FilesTotal:  stats["files"],
@@ -143,7 +145,7 @@ func (srv *Server) maybeRefresh(ctx interface{ Done() <-chan struct{} }) (bool, 
 	defer func() { srv.indexing = false }()
 
 	start := time.Now()
-	res, changed, err := EnsureFresh(srv.store, srv.root)
+	res, changed, err := EnsureFresh(srv.store, srv.root, srv.openCodeDB)
 	srv.lastRefresh = time.Now()
 	if err != nil {
 		srv.refreshErr = err.Error()
@@ -205,13 +207,14 @@ func (srv *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	srv.mu.Unlock()
 
 	writeJSON(w, r, map[string]any{
-		"indexing":       idx,
-		"last_index":     srv.store.GetMeta("last_index"),
-		"last_refresh":   last.UTC().Format(time.RFC3339),
-		"refresh_error":  errS,
-		"last_result":    lastRes,
-		"tables":         stats,
-		"sessions_root":  srv.root,
+		"indexing":      idx,
+		"last_index":    srv.store.GetMeta("last_index"),
+		"last_refresh":  last.UTC().Format(time.RFC3339),
+		"refresh_error": errS,
+		"last_result":   lastRes,
+		"tables":        stats,
+		"sessions_root": srv.root,
+		"opencode_db":   srv.openCodeDB,
 	})
 }
 
@@ -228,7 +231,7 @@ func (srv *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	srv.mu.Unlock()
 
 	start := time.Now()
-	res, err := Index(srv.store, IndexOptions{Root: srv.root, Full: full})
+	res, err := Index(srv.store, IndexOptions{Root: srv.root, OpenCodeDB: srv.openCodeDB, Full: full})
 	srv.mu.Lock()
 	srv.indexing = false
 	srv.lastRefresh = time.Now()
@@ -248,11 +251,12 @@ func (srv *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func facetsFrom(cube []CubeRow) Facets {
-	f := Facets{Projects: []string{}, Models: []string{}, Providers: []string{}, Kinds: []string{}, Days: []string{}}
+	f := Facets{Projects: []string{}, Models: []string{}, Providers: []string{}, Kinds: []string{}, Sources: []string{}, Days: []string{}}
 	seenP := map[string]bool{}
 	seenM := map[string]bool{}
 	seenV := map[string]bool{}
 	seenK := map[string]bool{}
+	seenS := map[string]bool{}
 	seenD := map[string]bool{}
 	for _, c := range cube {
 		if c.Project != "" && !seenP[c.Project] {
@@ -271,6 +275,10 @@ func facetsFrom(cube []CubeRow) Facets {
 			seenK[c.Kind] = true
 			f.Kinds = append(f.Kinds, c.Kind)
 		}
+		if c.Source != "" && !seenS[c.Source] {
+			seenS[c.Source] = true
+			f.Sources = append(f.Sources, c.Source)
+		}
 		if c.Day != "" && !seenD[c.Day] {
 			seenD[c.Day] = true
 			f.Days = append(f.Days, c.Day)
@@ -280,6 +288,7 @@ func facetsFrom(cube []CubeRow) Facets {
 	sortStrings(f.Models)
 	sortStrings(f.Providers)
 	sortStrings(f.Kinds)
+	sortStrings(f.Sources)
 	sortStrings(f.Days)
 	return f
 }

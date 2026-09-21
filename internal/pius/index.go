@@ -2,6 +2,7 @@ package pius
 
 import (
 	"database/sql"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -56,9 +57,12 @@ type Progress struct {
 
 // IndexOptions controls an index run.
 type IndexOptions struct {
-	Root     string
-	Full     bool
-	OnDone   func(Progress)
+	Root string
+	// OpenCodeDB is the path to opencode's SQLite database. Empty, "off", or a
+	// missing file means opencode contributes nothing to the index.
+	OpenCodeDB string
+	Full       bool
+	OnDone     func(Progress)
 }
 
 // Index synchronises the database with the sessions directory.
@@ -153,6 +157,13 @@ func Index(s *Store, opts IndexOptions) (*IndexResult, error) {
 		}
 	}
 
+	if opts.OpenCodeDB != "" {
+		if err := IndexOpenCode(s, opts.OpenCodeDB, res, opts.Full); err != nil {
+			// A locked or malformed opencode db must not kill the pi index.
+			log.Printf("opencode index skipped: %v", err)
+		}
+	}
+
 	if err := s.RebuildFacts(); err != nil {
 		return nil, err
 	}
@@ -168,20 +179,21 @@ func Index(s *Store, opts IndexOptions) (*IndexResult, error) {
 // EnsureFresh performs a cheap staleness check and indexes only what changed.
 // A full stat pass over the whole tree costs a few milliseconds, so this is safe
 // to call on every page load.
-func EnsureFresh(s *Store, root string) (*IndexResult, bool, error) {
-	changed, err := anyChanged(s, root)
+func EnsureFresh(s *Store, root, openCodeDB string) (*IndexResult, bool, error) {
+	changed, err := anyChanged(s, root, openCodeDB)
 	if err != nil {
 		return nil, false, err
 	}
 	if !changed {
 		return &IndexResult{}, false, nil
 	}
-	r, err := Index(s, IndexOptions{Root: root})
+	r, err := Index(s, IndexOptions{Root: root, OpenCodeDB: openCodeDB})
 	return r, true, err
 }
 
-// anyChanged reports whether any file differs in size from its recorded state.
-func anyChanged(s *Store, root string) (bool, error) {
+// anyChanged reports whether any file differs in size from its recorded state,
+// or the opencode database has unconsumed rows.
+func anyChanged(s *Store, root, openCodeDB string) (bool, error) {
 	files, err := Discover(root)
 	if err != nil {
 		return false, err
@@ -198,6 +210,9 @@ func anyChanged(s *Store, root string) (bool, error) {
 		if !st.Exists || st.Size != info.Size() {
 			return true, nil
 		}
+	}
+	if openCodeDB != "" {
+		return openCodeChanged(s, openCodeDB)
 	}
 	return false, nil
 }

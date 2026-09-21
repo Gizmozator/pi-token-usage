@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   cache_read  INTEGER NOT NULL DEFAULT 0,
   cache_write INTEGER NOT NULL DEFAULT 0,
   reasoning   INTEGER NOT NULL DEFAULT 0,
-  total   INTEGER NOT NULL DEFAULT 0
+  total   INTEGER NOT NULL DEFAULT 0,
+  source  TEXT NOT NULL DEFAULT 'pi'
 );
 
 -- Atomic unit of the index: one row per counted assistant message.
@@ -52,7 +53,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
   cache_read  INTEGER NOT NULL DEFAULT 0,
   cache_write INTEGER NOT NULL DEFAULT 0,
   reasoning   INTEGER NOT NULL DEFAULT 0,
-  total       INTEGER NOT NULL DEFAULT 0
+  total       INTEGER NOT NULL DEFAULT 0,
+  source      TEXT NOT NULL DEFAULT 'pi'
 );
 CREATE INDEX IF NOT EXISTS idx_ev_day    ON usage_events(day);
 CREATE INDEX IF NOT EXISTS idx_ev_proj   ON usage_events(project);
@@ -84,7 +86,8 @@ CREATE TABLE IF NOT EXISTS facts (
   reasoning   INTEGER NOT NULL DEFAULT 0,
   total       INTEGER NOT NULL DEFAULT 0,
   msgs        INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (day, hour, project, model, provider, kind)
+  source      TEXT NOT NULL DEFAULT 'pi',
+  PRIMARY KEY (day, hour, project, model, provider, kind, source)
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -126,10 +129,68 @@ func Open(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
+	if err := s.migrateSource(); err != nil {
+		return err
+	}
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
 	return s.repairUnknownEvents()
+}
+
+// migrateSource upgrades databases written before the source dimension existed.
+// sessions and usage_events gain the column with a 'pi' default, which is
+// correct for every row they can already hold. facts cannot gain it via ALTER -
+// the column is part of its PRIMARY KEY - but facts is a derived table that
+// RebuildFacts recomputes from usage_events on every index run, so a pre-source
+// facts is dropped here and recreated (empty) by the schema pass right after.
+func (s *Store) migrateSource() error {
+	for _, t := range []string{"sessions", "usage_events"} {
+		exists, err := s.tableExists(t)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		has, err := s.hasColumn(t, "source")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE ` + t + ` ADD COLUMN source TEXT NOT NULL DEFAULT 'pi'`); err != nil {
+				return err
+			}
+		}
+	}
+	exists, err := s.tableExists("facts")
+	if err != nil {
+		return err
+	}
+	if exists {
+		has, err := s.hasColumn("facts", "source")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`DROP TABLE facts`); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) tableExists(name string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
+	return n > 0, err
+}
+
+func (s *Store) hasColumn(table, col string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info(?) WHERE name=?`, table, col).Scan(&n)
+	return n > 0, err
 }
 
 // repairUnknownEvents heals the rows left behind by tail parses that ran before
@@ -202,11 +263,11 @@ const repairUnknownKey = "repaired_unknown_events_v1"
 
 // FileState is the recorded index state for one session file.
 type FileState struct {
-	Size     int64
-	MTimeNS  int64
-	Offset   int64
-	Indexed  string
-	Exists   bool
+	Size    int64
+	MTimeNS int64
+	Offset  int64
+	Indexed string
+	Exists  bool
 }
 
 // GetFile returns the recorded state for path.
@@ -256,9 +317,9 @@ func (s *Store) StoreFile(tx *sql.Tx, res *ParseResult, size, mtimeNS int64) err
 	}
 
 	insEvent, err := tx.Prepare(`INSERT INTO usage_events
-		(session_id, source_path, msg_id, ts, day, hour, project, model, provider, kind,
+		(session_id, source_path, msg_id, ts, day, hour, project, model, provider, kind, source,
 		 input, output, cache_read, cache_write, reasoning, total)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -297,8 +358,12 @@ func (s *Store) StoreFile(tx *sql.Tx, res *ParseResult, size, mtimeNS int64) err
 				return err
 			}
 		}
+		src := ev.Source
+		if src == "" {
+			src = SourcePi
+		}
 		if _, err := insEvent.Exec(ev.SessionID, ev.SourcePath, ev.MsgID, ev.TS, ev.Day, ev.Hour,
-			ev.Project, ev.Model, ev.Provider, ev.Kind,
+			ev.Project, ev.Model, ev.Provider, ev.Kind, src,
 			ev.Input, ev.Output, ev.CacheRead, ev.CacheWrite, ev.Reasoning, ev.Total); err != nil {
 			return err
 		}
@@ -319,14 +384,18 @@ func (s *Store) StoreFile(tx *sql.Tx, res *ParseResult, size, mtimeNS int64) err
 }
 
 func (s *Store) upsertSessionMeta(tx *sql.Tx, m SessionMeta) error {
-	_, err := tx.Exec(`INSERT INTO sessions (id, cwd, project, kind, agent, started, path)
-		VALUES (?,?,?,?,?,?,?)
+	src := m.Source
+	if src == "" {
+		src = SourcePi
+	}
+	_, err := tx.Exec(`INSERT INTO sessions (id, cwd, project, kind, agent, started, path, source)
+		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			cwd=excluded.cwd, project=excluded.project, kind=excluded.kind,
 			agent=CASE WHEN excluded.agent != '' THEN excluded.agent ELSE sessions.agent END,
 			started=CASE WHEN sessions.started = '' THEN excluded.started ELSE sessions.started END,
-			path=excluded.path`,
-		m.ID, m.CWD, m.Project, m.Kind, m.Agent, m.Started, m.Path)
+			path=excluded.path, source=excluded.source`,
+		m.ID, m.CWD, m.Project, m.Kind, m.Agent, m.Started, m.Path, src)
 	return err
 }
 
@@ -336,12 +405,12 @@ func (s *Store) RebuildFacts() error {
 	_, err := s.db.Exec(`
 		BEGIN IMMEDIATE;
 		DELETE FROM facts;
-		INSERT INTO facts (day, hour, project, model, provider, kind,
+		INSERT INTO facts (day, hour, project, model, provider, kind, source,
 			input, output, cache_read, cache_write, reasoning, total, msgs)
-		SELECT day, hour, project, model, provider, kind,
+		SELECT day, hour, project, model, provider, kind, source,
 			sum(input), sum(output), sum(cache_read), sum(cache_write),
 			sum(reasoning), sum(total), count(*)
-		FROM usage_events GROUP BY day, hour, project, model, provider, kind;
+		FROM usage_events GROUP BY day, hour, project, model, provider, kind, source;
 		COMMIT;`)
 	return err
 }
@@ -435,12 +504,13 @@ type CubeRow struct {
 	Reasoning  int    `json:"r"`
 	Total      int    `json:"t"`
 	Msgs       int    `json:"n"`
+	Source     string `json:"s"`
 }
 
 // Cube returns the full rollup.
 func (s *Store) Cube() ([]CubeRow, error) {
 	rows, err := s.db.Query(`SELECT day, hour, project, model, provider, kind,
-		input, output, cache_read, cache_write, reasoning, total, msgs
+		input, output, cache_read, cache_write, reasoning, total, msgs, source
 		FROM facts ORDER BY day, project, model`)
 	if err != nil {
 		return nil, err
@@ -451,7 +521,7 @@ func (s *Store) Cube() ([]CubeRow, error) {
 	for rows.Next() {
 		var r CubeRow
 		if err := rows.Scan(&r.Day, &r.Hour, &r.Project, &r.Model, &r.Provider, &r.Kind,
-			&r.Input, &r.Output, &r.CacheRead, &r.CacheWrite, &r.Reasoning, &r.Total, &r.Msgs); err != nil {
+			&r.Input, &r.Output, &r.CacheRead, &r.CacheWrite, &r.Reasoning, &r.Total, &r.Msgs, &r.Source); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -471,6 +541,7 @@ type SessionRow struct {
 	Total   int    `json:"total"`
 	Input   int    `json:"input"`
 	Output  int    `json:"output"`
+	Source  string `json:"source"`
 }
 
 // Sessions returns the session list, largest first.
@@ -478,7 +549,7 @@ func (s *Store) Sessions(limit int) ([]SessionRow, error) {
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.db.Query(`SELECT id, project, kind, agent, cwd, started, msgs, total, input, output
+	rows, err := s.db.Query(`SELECT id, project, kind, agent, cwd, started, msgs, total, input, output, source
 		FROM sessions ORDER BY total DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -489,7 +560,7 @@ func (s *Store) Sessions(limit int) ([]SessionRow, error) {
 	for rows.Next() {
 		var r SessionRow
 		if err := rows.Scan(&r.ID, &r.Project, &r.Kind, &r.Agent, &r.CWD, &r.Started,
-			&r.Msgs, &r.Total, &r.Input, &r.Output); err != nil {
+			&r.Msgs, &r.Total, &r.Input, &r.Output, &r.Source); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

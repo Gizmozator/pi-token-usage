@@ -1,6 +1,11 @@
 IMAGE    ?= pi-token-usage:latest
 NAME     ?= pitokens
 SESSIONS ?= $(HOME)/.pi/agent/sessions
+OPENCODE ?= $(HOME)/.local/share/opencode
+# Only mount the opencode dir when its db exists, so docker doesn't create an
+# empty root-owned directory on machines without opencode.
+OPENCODE_MOUNT := $(shell [ -f "$(OPENCODE)/opencode.db" ] && echo "-v $(OPENCODE):/opencode:ro")
+OPENCODE_ENV   := $(shell [ -f "$(OPENCODE)/opencode.db" ] && echo "-e OPENCODE_DB=/opencode/opencode.db")
 DB_VOL   ?= pitokens-data
 PORT     ?= 7777
 TZ       ?= $(shell timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)
@@ -44,9 +49,11 @@ docker-up: docker-build ## start with correct mounts (sessions read-only, db in 
 	docker run -d --name $(NAME) \
 	  -p 127.0.0.1:$(PORT):7777 \
 	  -v "$(SESSIONS):/sessions:ro" \
+	  $(OPENCODE_MOUNT) \
 	  -v $(DB_VOL):/data \
 	  -e TZ=$(TZ) \
 	  -e PI_SESSIONS_DIR=/sessions \
+	  $(OPENCODE_ENV) \
 	  -e PITOKENS_DB=/data/db/index.db \
 	  -e PITOKENS_ADDR=0.0.0.0:7777 \
 	  --read-only --tmpfs /tmp \
@@ -79,8 +86,9 @@ docker-clean: ## remove container AND the database volume
 docker-shell: ## run an arbitrary CLI subcommand, e.g. make docker-shell CMD="report -by project"
 	docker run --rm -it \
 	  -v "$(SESSIONS):/sessions:ro" \
+	  $(OPENCODE_MOUNT) \
 	  -v $(DB_VOL):/data \
-	  -e TZ=$(TZ) -e PI_SESSIONS_DIR=/sessions -e PITOKENS_DB=/data/db/index.db \
+	  -e TZ=$(TZ) -e PI_SESSIONS_DIR=/sessions $(OPENCODE_ENV) -e PITOKENS_DB=/data/db/index.db \
 	  --entrypoint /pitokens $(IMAGE) $(or $(CMD),report)
 
 help: ## show this help

@@ -26,6 +26,7 @@ const (
 	envDB       = "PITOKENS_DB"
 	envAddr     = "PITOKENS_ADDR"
 	envTZ       = "TZ"
+	envOpenCode = "OPENCODE_DB"
 )
 
 func main() {
@@ -64,16 +65,19 @@ Usage:
 
 Commands:
   index      Parse ~/.pi/agent/sessions into the SQLite index
-               -full   wipe and re-parse everything
+               -full          wipe and re-parse everything
+               -opencode PATH opencode db to ingest alongside pi
   serve      Serve the web UI and API
   report     Print text tables (no browser needed)
-               -by  day | month | project | model | provider | kind
+               -by  day | month | project | model | provider | kind | source
   healthcheck  Exit 0 if the listener answers, 1 otherwise
 
 Environment:
   PI_SESSIONS_DIR   sessions root   (default ~/.pi/agent/sessions)
   PITOKENS_DB       database path   (default ~/.local/share/pi-token-usage/index.db)
   PITOKENS_ADDR     listen address  (default 127.0.0.1:7777)
+  OPENCODE_DB       opencode db     (default ~/.local/share/opencode/opencode.db,
+                                   'off' disables ingesting opencode tokens)
   TZ                day bucketing   (default system local zone)
 `)
 }
@@ -83,6 +87,7 @@ type config struct {
 	db       string
 	addr     string
 	tz       string
+	opencode string
 }
 
 func loadConfig() (config, error) {
@@ -95,6 +100,11 @@ func loadConfig() (config, error) {
 	c.db = firstNonEmpty(os.Getenv(envDB), filepath.Join(home, ".local", "share", "pi-token-usage", "index.db"))
 	c.addr = firstNonEmpty(os.Getenv(envAddr), "127.0.0.1:7777")
 	c.tz = os.Getenv(envTZ)
+	c.opencode = firstNonEmpty(os.Getenv(envOpenCode), filepath.Join(home, ".local", "share", "opencode", "opencode.db"))
+	// OPENCODE_DB=off opts out entirely; an unset value keeps the default path.
+	if strings.EqualFold(strings.TrimSpace(c.opencode), "off") {
+		c.opencode = ""
+	}
 	return c, nil
 }
 
@@ -137,6 +147,7 @@ func cmdIndex(argv []string) int {
 	full := fs.Bool("full", false, "wipe and re-parse everything")
 	sessions := fs.String("sessions", "", "sessions root")
 	dbPath := fs.String("db", "", "database path")
+	openCode := fs.String("opencode", "", "opencode db path ('off' to disable)")
 	_ = fs.Parse(argv)
 
 	cfg, err := loadConfig()
@@ -149,6 +160,12 @@ func cmdIndex(argv []string) int {
 	if *dbPath != "" {
 		cfg.db = *dbPath
 	}
+	if *openCode != "" {
+		cfg.opencode = strings.TrimSpace(*openCode)
+		if strings.EqualFold(cfg.opencode, "off") {
+			cfg.opencode = ""
+		}
+	}
 	applyZone(cfg.tz)
 
 	st, err := openDB(cfg.db)
@@ -158,7 +175,10 @@ func cmdIndex(argv []string) int {
 	defer st.Close()
 
 	fmt.Printf("indexing %s -> %s (full=%v)\n", cfg.sessions, cfg.db, *full)
-	res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, Full: *full})
+	if cfg.opencode != "" {
+		fmt.Printf("opencode db:    %s\n", cfg.opencode)
+	}
+	res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode, Full: *full})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -187,6 +207,7 @@ func cmdServe(argv []string) int {
 	addr := fs.String("addr", "", "listen address")
 	sessions := fs.String("sessions", "", "sessions root")
 	dbPath := fs.String("db", "", "database path")
+	openCode := fs.String("opencode", "", "opencode db path ('off' to disable)")
 	noIndex := fs.Bool("no-index", false, "skip the startup index")
 	_ = fs.Parse(argv)
 
@@ -203,6 +224,12 @@ func cmdServe(argv []string) int {
 	if *dbPath != "" {
 		cfg.db = *dbPath
 	}
+	if *openCode != "" {
+		cfg.opencode = strings.TrimSpace(*openCode)
+		if strings.EqualFold(cfg.opencode, "off") {
+			cfg.opencode = ""
+		}
+	}
 	applyZone(cfg.tz)
 
 	st, err := openDB(cfg.db)
@@ -213,7 +240,7 @@ func cmdServe(argv []string) int {
 
 	if !*noIndex {
 		fmt.Printf("cold index of %s ...\n", cfg.sessions)
-		res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions})
+		res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode})
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -221,7 +248,7 @@ func cmdServe(argv []string) int {
 			res.FilesScanned, res.FilesSkipped, res.ElapsedMS)
 	}
 
-	srv := pius.NewServer(st, cfg.sessions, pius.WebFS())
+	srv := pius.NewServer(st, cfg.sessions, cfg.opencode, pius.WebFS())
 	httpSrv := &http.Server{
 		Addr:              cfg.addr,
 		Handler:           srv.Handler(),
@@ -247,7 +274,7 @@ func cmdServe(argv []string) int {
 
 func cmdReport(argv []string) int {
 	fs := flag.NewFlagSet("report", flag.ExitOnError)
-	by := fs.String("by", "month", "day | month | project | model | provider | kind")
+	by := fs.String("by", "month", "day | month | project | model | provider | kind | source")
 	dbPath := fs.String("db", "", "database path")
 	_ = fs.Parse(argv)
 
@@ -276,8 +303,8 @@ func cmdReport(argv []string) int {
 	}
 
 	type agg struct {
-		key                            string
-		in, out, cache, total, msgs    int
+		key                         string
+		in, out, cache, total, msgs int
 	}
 	buckets := map[string]*agg{}
 	for _, c := range cube {
@@ -295,6 +322,8 @@ func cmdReport(argv []string) int {
 			k = c.Provider
 		case "kind":
 			k = string(c.Kind)
+		case "source":
+			k = c.Source
 		}
 		b := buckets[k]
 		if b == nil {

@@ -38,7 +38,7 @@ const charts = {};
 const $ = (id) => document.getElementById(id);
 
 const state = {
-  project: '', model: '', kind: '',
+  project: '', model: '', kind: '', source: '',
   gran: 'month', from: '', to: '',
   showCache: false, log: false,
 };
@@ -87,6 +87,7 @@ function filtered() {
     (!state.project || r.p === state.project) &&
     (!state.model || r.m === state.model) &&
     (!state.kind || r.k === state.kind) &&
+    (!state.source || r.s === state.source) &&
     (!state.from || r.d >= state.from) &&
     (!state.to || r.d <= state.to)
   );
@@ -522,6 +523,7 @@ function syncControls() {
   $('fProject').value = state.project;
   $('fModel').value = state.model;
   $('fKind').value = state.kind;
+  $('fSource').value = state.source;
   $('fGran').value = state.gran;
   $('fFrom').value = state.from;
   $('fTo').value = state.to;
@@ -535,6 +537,7 @@ function bind() {
   on('fProject', 'change', (e) => { state.project = e.target.value; render(); });
   on('fModel', 'change', (e) => { state.model = e.target.value; render(); });
   on('fKind', 'change', (e) => { state.kind = e.target.value; render(); });
+  on('fSource', 'change', (e) => { state.source = e.target.value; render(); });
   on('fGran', 'change', (e) => { state.gran = e.target.value; render(); });
   on('fFrom', 'change', (e) => { state.from = e.target.value; render(); });
   on('fTo', 'change', (e) => { state.to = e.target.value; render(); });
@@ -542,7 +545,7 @@ function bind() {
   on('fLog', 'change', (e) => { state.log = e.target.checked; render(); });
 
   on('btnClear', 'click', () => {
-    Object.assign(state, { project: '', model: '', kind: '', gran: 'month', from: '', to: '', showCache: false, log: false });
+    Object.assign(state, { project: '', model: '', kind: '', source: '', gran: 'month', from: '', to: '', showCache: false, log: false });
     syncControls(); render();
   });
 
@@ -583,6 +586,7 @@ async function boot(preserveFilters) {
   fillSelect('fProject', DATA.facets.projects || [], 'all');
   fillSelect('fModel', DATA.facets.models || [], 'all');
   fillSelect('fKind', DATA.facets.kinds || [], 'all');
+  fillSelect('fSource', DATA.facets.sources || [], 'all');
   syncControls();
 
   const idx = DATA.index || {};

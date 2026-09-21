@@ -1,7 +1,9 @@
 # pi-token-usage
 
-Local dashboard for token usage by the [pi](https://pi.dev) coding agent. Parses
-`~/.pi/agent/sessions` into SQLite and charts it per day / month / project / model.
+Local dashboard for token usage by the [pi](https://pi.dev) coding agent — and
+[opencode](https://opencode.ai), whose tokens are indexed alongside pi's and can
+be filtered per source. Parses `~/.pi/agent/sessions` plus opencode's SQLite db
+into one index and charts it per day / month / project / model / source.
 
 Single static Go binary, Chart.js UI, no external services. All data stays on your
 machine and the server binds to loopback only.
@@ -19,7 +21,24 @@ Or without the browser:
 ```bash
 make report BY=project
 make report BY=month
+make report BY=source   # pi vs opencode
 ```
+
+## opencode tokens
+
+opencode keeps per-message token accounting in
+`~/.local/share/opencode/opencode.db` (SQLite, WAL). The indexer reads assistant
+messages from it read-only and folds them into the same `usage_events` table with
+`source='opencode'` — the UI's **source** filter then shows pi only, opencode
+only, or both. Ingestion is incremental by `message.rowid` (opencode only
+appends), so re-runs cost milliseconds.
+
+- Override the path with `OPENCODE_DB=/path/to/opencode.db` or `-opencode PATH`
+  on `index`/`serve`; `OPENCODE_DB=off` disables it.
+- A missing or locked opencode db is skipped with a log line — it never breaks
+  the pi index.
+- opencode sessions map onto the existing dimensions: `directory` → project,
+  `parent_id` → subagent kind, `modelID`/`providerID` → model/provider.
 
 ## Docker
 

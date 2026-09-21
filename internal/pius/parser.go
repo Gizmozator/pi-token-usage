@@ -11,6 +11,13 @@ import (
 	"time"
 )
 
+// Source identifies which agent tool produced an event. The UI exposes it as a
+// filter so pi and opencode usage can be viewed together or apart.
+const (
+	SourcePi       = "pi"
+	SourceOpenCode = "opencode"
+)
+
 // Kind classifies a session file by its position in the sessions tree.
 type Kind string
 
@@ -32,27 +39,31 @@ type SessionMeta struct {
 	Agent   string `json:"agent"`
 	Started string `json:"started"`
 	Path    string `json:"path"`
+	// Source is the tool that produced the session; empty means SourcePi.
+	Source string `json:"source"`
 }
 
 // UsageEvent is one counted assistant message. This is the atomic unit of the
 // index; every rollup is derived from these rows.
 type UsageEvent struct {
-	SessionID  string  `json:"session_id"`
-	SourcePath string  `json:"source_path"`
-	MsgID      string  `json:"msg_id"`
-	TS         string  `json:"ts"`
-	Day        string  `json:"day"`
-	Hour       int     `json:"hour"`
-	Project    string  `json:"project"`
-	Model      string  `json:"model"`
-	Provider   string  `json:"provider"`
-	Kind       Kind    `json:"kind"`
-	Input      int     `json:"input"`
-	Output     int     `json:"output"`
-	CacheRead  int     `json:"cache_read"`
-	CacheWrite int     `json:"cache_write"`
-	Reasoning  int     `json:"reasoning"`
-	Total      int     `json:"total"`
+	SessionID  string `json:"session_id"`
+	SourcePath string `json:"source_path"`
+	MsgID      string `json:"msg_id"`
+	TS         string `json:"ts"`
+	Day        string `json:"day"`
+	Hour       int    `json:"hour"`
+	Project    string `json:"project"`
+	Model      string `json:"model"`
+	Provider   string `json:"provider"`
+	Kind       Kind   `json:"kind"`
+	// Source is the tool that produced the event; empty means SourcePi.
+	Source     string `json:"source"`
+	Input      int    `json:"input"`
+	Output     int    `json:"output"`
+	CacheRead  int    `json:"cache_read"`
+	CacheWrite int    `json:"cache_write"`
+	Reasoning  int    `json:"reasoning"`
+	Total      int    `json:"total"`
 }
 
 // ParseResult is what one file contributes to the index.
@@ -75,8 +86,6 @@ type ParseResult struct {
 	// loc is the bucketing zone for this parse; set by ParseFile, not serialised.
 	loc *time.Location
 }
-
-
 
 // classify maps a session file path to its Kind.
 func classify(path string) Kind {
