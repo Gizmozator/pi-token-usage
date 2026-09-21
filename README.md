@@ -66,17 +66,27 @@ make docker-down
 ```
 
 The image is a 16 MB `scratch` container. `make docker-up` mounts everything
-correctly:
+correctly and runs the container **as your host uid** (`RUNAS`), so owner-only
+source dirs like `~/.opencodereview/sessions` (0700) are readable without any
+ACL changes:
 
 | Host | Container | Mode |
 |---|---|---|
 | `~/.pi/agent/sessions` | `/sessions` | read-only |
-| named volume `pitokens-data` | `/data` | read-write |
+| `~/.local/share/opencode` | `/opencode` | read-only (when present) |
+| `~/.opencodereview` | `/ocr` | read-only (when present) |
+| `~/.local/share/pi-token-usage` | `/data` | read-write bind |
+
+The DB is a bind-mount of the host CLI's own directory, not a named volume —
+a named volume would carry the image's staged 65534 ownership and be
+unwritable by the host uid. Sharing one database means `make index` on the
+host and the container see the same data (cross-path re-indexes are deduped
+by message id, not double-counted).
 
 Override anything:
 
 ```bash
-make docker-up SESSIONS=/other/sessions PORT=8080 TZ=Europe/Berlin DB_VOL=my-vol
+make docker-up SESSIONS=/other/sessions PORT=8080 TZ=Europe/Berlin DATA_DIR=/other/dbdir RUNAS=1000:1000
 ```
 
 Other targets: `docker-reindex`, `docker-rebuild-index`, `docker-status`,

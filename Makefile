@@ -12,6 +12,14 @@ OPENCODE_ENV   := $(shell [ -f "$(OPENCODE)/opencode.db" ] && echo "-e OPENCODE_
 OCR_MOUNT    := $(shell [ -d "$(OCR_HOME)/sessions" ] && echo "-v $(OCR_HOME):/ocr:ro")
 OCR_ENV      := $(shell [ -d "$(OCR_HOME)/sessions" ] && echo "-e OCR_SESSIONS_DIR=/ocr/sessions")
 DB_VOL   ?= pitokens-data
+# Run as the host user so the container can read owner-only data dirs
+# (~/.opencodereview/sessions is 0700) without any ACL changes.
+RUNAS    ?= $(shell id -u):$(shell id -g)
+# The DB is bind-mounted from the host instead of a named volume: a named
+# volume carries the image's staged 65534 ownership and is unwritable by
+# the host uid. This is also the host CLI's own database, so `make index`
+# and the container share one index.
+DATA_DIR ?= $(HOME)/.local/share/pi-token-usage
 PORT     ?= 7777
 TZ       ?= $(shell timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)
 BIN      ?= pitokens
@@ -49,23 +57,25 @@ clean: ## remove build artifacts
 docker-build: ## build the container image
 	docker build -t $(IMAGE) .
 
-docker-up: docker-build ## start with correct mounts (sessions read-only, db in a volume)
+docker-up: docker-build ## start with correct mounts (sessions read-only, db bind-mounted)
 	-docker rm -f $(NAME) >/dev/null 2>&1
+	mkdir -p $(DATA_DIR)
 	docker run -d --name $(NAME) \
+	  --user $(RUNAS) \
 	  -p 127.0.0.1:$(PORT):7777 \
 	  -v "$(SESSIONS):/sessions:ro" \
 	  $(OPENCODE_MOUNT) \
 	  $(OCR_MOUNT) \
-	  -v $(DB_VOL):/data \
+	  -v "$(DATA_DIR):/data" \
 	  -e TZ=$(TZ) \
 	  -e PI_SESSIONS_DIR=/sessions \
 	  $(OPENCODE_ENV) \
 	  $(OCR_ENV) \
-	  -e PITOKENS_DB=/data/db/index.db \
+	  -e PITOKENS_DB=/data/index.db \
 	  -e PITOKENS_ADDR=0.0.0.0:7777 \
 	  --read-only --tmpfs /tmp \
 	  $(IMAGE)
-	@echo "→ http://127.0.0.1:$(PORT)   (tz=$(TZ))"
+	@echo "→ http://127.0.0.1:$(PORT)   (tz=$(TZ), uid=$(RUNAS))"
 
 docker-down: ## stop the container
 	docker stop $(NAME)
@@ -92,11 +102,12 @@ docker-clean: ## remove container AND the database volume
 
 docker-shell: ## run an arbitrary CLI subcommand, e.g. make docker-shell CMD="report -by project"
 	docker run --rm -it \
+	  --user $(RUNAS) \
 	  -v "$(SESSIONS):/sessions:ro" \
 	  $(OPENCODE_MOUNT) \
 	  $(OCR_MOUNT) \
-	  -v $(DB_VOL):/data \
-	  -e TZ=$(TZ) -e PI_SESSIONS_DIR=/sessions $(OPENCODE_ENV) $(OCR_ENV) -e PITOKENS_DB=/data/db/index.db \
+	  -v "$(DATA_DIR):/data" \
+	  -e TZ=$(TZ) -e PI_SESSIONS_DIR=/sessions $(OPENCODE_ENV) $(OCR_ENV) -e PITOKENS_DB=/data/index.db \
 	  --entrypoint /pitokens $(IMAGE) $(or $(CMD),report)
 
 help: ## show this help
