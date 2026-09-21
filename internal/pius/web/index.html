@@ -39,7 +39,6 @@
   <div class="fg"><label for="fFrom">from</label><input type="date" id="fFrom"></div>
   <div class="fg"><label for="fTo">to</label><input type="date" id="fTo"></div>
   <div class="fg grow"></div>
-  <label class="chk"><input type="checkbox" id="fCache"><span>overlay cache re-read</span></label>
   <label class="chk"><input type="checkbox" id="fLog"><span>log scale</span></label>
   <button id="btnClear" class="btn tiny ghost">reset</button>
 </section>
@@ -50,6 +49,7 @@
     <div class="hero-main">
       <div class="hero-k">new tokens</div>
       <div class="hero-v" id="hNew">0</div>
+      <div class="hero-with">incl. cache re-read <b id="hWithCache">0</b></div>
       <div class="hero-s">fresh work · input + output, excluding cache re-reads</div>
       <div class="hero-split">
         <div class="split">

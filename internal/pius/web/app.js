@@ -125,6 +125,7 @@ function renderHero(rows) {
   const activeDays = days.size || 1;
 
   countUp($('hNew'), fresh, fmtTok);
+  countUp($('hWithCache'), fresh + t.cacheRead, fmtTok);
   countUp($('hIn'), t.input, fmtTok);
   countUp($('hOut'), t.output, fmtTok);
   countUp($('hPerDay'), fresh / activeDays, fmtTok);
@@ -190,15 +191,15 @@ function renderMain(rows) {
     },
   ];
 
-  if (state.showCache) {
-    ds.push({
-      label: 'cache re-read (secondary)',
-      data: keys.map((k) => agg.get(k).cacheRead),
-      borderColor: C.cache, backgroundColor: 'transparent',
-      borderDash: [6, 5], borderWidth: 1.4, fill: false, tension: 0.3,
-      pointRadius: 0, pointHoverRadius: 3,
-    });
-  }
+  // Cache re-read is always part of the chart but hidden by default; the
+  // legend click (wired below) toggles it, so the old checkbox is gone.
+  ds.push({
+    label: 'cache re-read (secondary)',
+    data: keys.map((k) => agg.get(k).cacheRead),
+    borderColor: C.cache, backgroundColor: 'transparent',
+    borderDash: [6, 5], borderWidth: 1.4, fill: false, tension: 0.3,
+    pointRadius: 0, pointHoverRadius: 3, hidden: !state.showCache,
+  });
 
   const yType = state.log ? 'logarithmic' : 'linear';
   const cfg = {
@@ -208,7 +209,21 @@ function renderMain(rows) {
       responsive: true, maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { labels: { boxWidth: 14, boxHeight: 3, usePointStyle: false, padding: 16 } },
+        legend: {
+          labels: { boxWidth: 14, boxHeight: 3, usePointStyle: false, padding: 16 },
+          // Legend click replaces the removed checkbox: toggling the cache
+          // series must sync back into state so re-renders (filter changes)
+          // keep the user's choice instead of resetting it.
+          onClick: (e, legendItem) => {
+            const ci = charts.main;
+            if (!ci) return;
+            const show = !ci.isDatasetVisible(legendItem.datasetIndex);
+            ci.setDatasetVisibility(legendItem.datasetIndex, show);
+            if (legendItem.datasetIndex === 3) state.showCache = show;
+            ci.update();
+            writeURL();
+          },
+        },
         tooltip: { callbacks: { label: (c) => ' ' + c.dataset.label + ': ' + fmtInt(c.parsed.y) } },
       },
       scales: {
@@ -224,6 +239,10 @@ function renderMain(rows) {
 
   if (charts.main) {
     charts.main.data = cfg.data;
+    // meta.hidden (set by legend clicks) wins over dataset.hidden on updates,
+    // so sync visibility from state explicitly - this is what makes `reset`
+    // and URL-driven showCache actually hide/show the series.
+    charts.main.setDatasetVisibility(3, !!state.showCache);
     charts.main.options.scales.y.type = yType;
     charts.main.options.scales.y.beginAtZero = !state.log;
     charts.main.update();
@@ -527,7 +546,6 @@ function syncControls() {
   $('fGran').value = state.gran;
   $('fFrom').value = state.from;
   $('fTo').value = state.to;
-  $('fCache').checked = !!state.showCache;
   $('fLog').checked = !!state.log;
 }
 
@@ -541,7 +559,6 @@ function bind() {
   on('fGran', 'change', (e) => { state.gran = e.target.value; render(); });
   on('fFrom', 'change', (e) => { state.from = e.target.value; render(); });
   on('fTo', 'change', (e) => { state.to = e.target.value; render(); });
-  on('fCache', 'change', (e) => { state.showCache = e.target.checked; render(); });
   on('fLog', 'change', (e) => { state.log = e.target.checked; render(); });
 
   on('btnClear', 'click', () => {
