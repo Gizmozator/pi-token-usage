@@ -11,3 +11,5 @@ README.md
 Makefile
 Dockerfile
 .dockerignore
+docker-compose.yml
+.env

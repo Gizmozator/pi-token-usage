@@ -3,15 +3,6 @@ NAME     ?= pitokens
 SESSIONS ?= $(HOME)/.pi/agent/sessions
 OPENCODE ?= $(HOME)/.local/share/opencode
 OCR_HOME ?= $(HOME)/.opencodereview
-# Only mount the opencode dir when its db exists, so docker doesn't create an
-# empty root-owned directory on machines without opencode.
-OPENCODE_MOUNT := $(shell [ -f "$(OPENCODE)/opencode.db" ] && echo "-v $(OPENCODE):/opencode:ro")
-OPENCODE_ENV   := $(shell [ -f "$(OPENCODE)/opencode.db" ] && echo "-e OPENCODE_DB=/opencode/opencode.db")
-# ocr: mount the whole ~/.opencodereview (sessions + config.json for the
-# provider name) read-only, only when the sessions dir exists.
-OCR_MOUNT    := $(shell [ -d "$(OCR_HOME)/sessions" ] && echo "-v $(OCR_HOME):/ocr:ro")
-OCR_ENV      := $(shell [ -d "$(OCR_HOME)/sessions" ] && echo "-e OCR_SESSIONS_DIR=/ocr/sessions")
-DB_VOL   ?= pitokens-data
 # Run as the host user so the container can read owner-only data dirs
 # (~/.opencodereview/sessions is 0700) without any ACL changes.
 RUNAS    ?= $(shell id -u):$(shell id -g)
@@ -23,6 +14,15 @@ DATA_DIR ?= $(HOME)/.local/share/pi-token-usage
 PORT     ?= 7777
 TZ       ?= $(shell timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo UTC)
 BIN      ?= pitokens
+COMPOSE  ?= docker compose
+# Compose service name (docker-compose.yml). Distinct from $(NAME), which is the
+# container name — overriding NAME must not break `compose exec <service>`.
+SERVICE ?= pitokens
+
+# `docker compose` interpolates ${VARS} from the process environment, not from
+# make variables, so these have to be exported for the compose file to see them
+# (they override the committed .env, which is the bare-compose fallback).
+export IMAGE NAME SESSIONS OPENCODE OCR_HOME DATA_DIR PORT TZ RUNAS
 
 .DEFAULT_GOAL := help
 
@@ -38,12 +38,12 @@ vet: ## go vet
 	go vet ./...
 
 index: build ## incremental index into the local db
-	PI_SESSIONS_DIR=$(SESSIONS) ./$(BIN) index
+	PI_SESSIONS_DIR=$(SESSIONS) PITOKENS_DB=$(DATA_DIR)/index.db ./$(BIN) index
 
 index-full: build ## wipe and re-parse everything
-	PI_SESSIONS_DIR=$(SESSIONS) ./$(BIN) index --full
+	PI_SESSIONS_DIR=$(SESSIONS) PITOKENS_DB=$(DATA_DIR)/index.db ./$(BIN) index --full
 
-run: build ## serve locally (http://127.0.0.1:$(PORT))
+run: build ## serve locally on the host (http://127.0.0.1:7777)
 	PI_SESSIONS_DIR=$(SESSIONS) PITOKENS_ADDR=127.0.0.1:$(PORT) ./$(BIN) serve
 
 report: build ## text report, e.g. make report BY=project
@@ -54,66 +54,57 @@ clean: ## remove build artifacts
 
 # ------------------------------------------------------------------ docker
 
-docker-build: ## build the container image
-	docker build -t $(IMAGE) .
+# Everything below drives docker-compose.yml, which owns the mounts, env and the
+# restart policy. `restart: unless-stopped` + the enabled docker daemon = the
+# dashboard is up after every boot; `make docker-down` is the only thing that
+# keeps it down.
 
-docker-up: docker-build ## start with correct mounts (sessions read-only, db bind-mounted)
-	-docker rm -f $(NAME) >/dev/null 2>&1
+docker-build: ## build the container image
+	$(COMPOSE) build
+
+docker-up: docker-build ## start the daemon (comes back on boot via restart policy)
+	# Create the host data dir first: docker would create a missing bind source
+	# as root:root, which the container's host uid cannot write into.
 	mkdir -p $(DATA_DIR)
-	docker run -d --name $(NAME) \
-	  --user $(RUNAS) \
-	  -p 127.0.0.1:$(PORT):7777 \
-	  -v "$(SESSIONS):/sessions:ro" \
-	  $(OPENCODE_MOUNT) \
-	  $(OCR_MOUNT) \
-	  -v "$(DATA_DIR):/data" \
-	  -e TZ=$(TZ) \
-	  -e PI_SESSIONS_DIR=/sessions \
-	  $(OPENCODE_ENV) \
-	  $(OCR_ENV) \
-	  -e PITOKENS_DB=/data/index.db \
-	  -e PITOKENS_ADDR=0.0.0.0:7777 \
-	  --read-only --tmpfs /tmp \
-	  $(IMAGE)
+	$(COMPOSE) up -d
 	@echo "→ http://127.0.0.1:$(PORT)   (tz=$(TZ), uid=$(RUNAS))"
 
-docker-down: ## stop the container
-	docker stop $(NAME)
+docker-down: ## stop and remove the container (data dir is a bind-mount, kept)
+	$(COMPOSE) down
 
 docker-restart: ## restart the container
-	docker restart $(NAME)
+	$(COMPOSE) restart
 
 docker-logs: ## follow container logs
-	docker logs -f $(NAME)
+	$(COMPOSE) logs -f
+
+docker-ps: ## is it running, and with what restart policy
+	$(COMPOSE) ps
+	@echo "restart policy: $$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' $(NAME) 2>/dev/null || echo '(not running)')"
+	@echo "docker daemon:  $$(systemctl is-enabled docker 2>/dev/null || echo '(unknown)') at boot"
 
 docker-reindex: ## incremental re-index inside the container
-	docker exec $(NAME) /pitokens index
+	$(COMPOSE) exec $(SERVICE) /pitokens index
 
 docker-rebuild-index: ## full re-index inside the container (clears offsets)
-	docker exec $(NAME) /pitokens index --full
+	$(COMPOSE) exec $(SERVICE) /pitokens index --full
 
 docker-status: ## show index/table stats
-	docker exec $(NAME) /pitokens healthcheck && \
-	docker exec $(NAME) /pitokens report -by month | tail -12
+	$(COMPOSE) exec $(SERVICE) /pitokens healthcheck && \
+	$(COMPOSE) exec $(SERVICE) /pitokens report -by month | tail -12
 
-docker-clean: ## remove container AND the database volume
-	-docker rm -f $(NAME) >/dev/null 2>&1
-	-docker volume rm $(DB_VOL) >/dev/null 2>&1
+# The database survives `docker-clean`: it is a bind-mount of $(DATA_DIR),
+# not a named volume, so `down -v` cannot reach it.
+docker-clean: ## remove the stack (container, network, anonymous volumes)
+	$(COMPOSE) down -v --remove-orphans
 
 docker-shell: ## run an arbitrary CLI subcommand, e.g. make docker-shell CMD="report -by project"
-	docker run --rm -it \
-	  --user $(RUNAS) \
-	  -v "$(SESSIONS):/sessions:ro" \
-	  $(OPENCODE_MOUNT) \
-	  $(OCR_MOUNT) \
-	  -v "$(DATA_DIR):/data" \
-	  -e TZ=$(TZ) -e PI_SESSIONS_DIR=/sessions $(OPENCODE_ENV) $(OCR_ENV) -e PITOKENS_DB=/data/index.db \
-	  --entrypoint /pitokens $(IMAGE) $(or $(CMD),report)
+	$(COMPOSE) run --rm --entrypoint /pitokens $(SERVICE) $(or $(CMD),report)
 
 help: ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build test vet index index-full run report clean \
-        docker-build docker-up docker-down docker-restart docker-logs \
+        docker-build docker-up docker-down docker-restart docker-logs docker-ps \
         docker-reindex docker-rebuild-index docker-status docker-clean docker-shell help

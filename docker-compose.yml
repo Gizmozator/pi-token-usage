@@ -1,0 +1,48 @@
+# pi-token-usage — long-lived dashboard container.
+#
+# Every mount is unconditional on purpose: this stack runs on the host that owns
+# the data dirs, so it does not need the `[ -f ... ] && echo -v ...` presence
+# checks the old one-line `docker run` used. Missing sources are skipped by the
+# indexer itself (a missing opencode db / ocr dir is a no-op, not an error).
+#
+# Boot persistence: `restart: unless-stopped` + the enabled docker daemon means
+# the container comes back on every boot, and stays down only if you explicitly
+# `make docker-down` it. No systemd unit needed.
+#
+# Values come from .env (local overrides, committed since it holds no secrets);
+# each one also has a default here, so `docker compose up -d` works bare.
+
+name: pi-token-usage
+
+services:
+  pitokens:
+    image: ${IMAGE:-pi-token-usage:latest}
+    container_name: ${NAME:-pitokens}
+    build:
+      context: .
+    restart: unless-stopped
+    # Run as the host uid:gid. ~/.opencodereview/sessions is 0700, so a
+    # foreign uid cannot read it no matter how the bind-mount is written.
+    user: "${RUNAS:-1000:1000}"
+    ports:
+      # Loopback-only by default; override PORT_BIND to expose it.
+      - "${PORT_BIND:-127.0.0.1}:${PORT:-7777}:7777"
+    volumes:
+      - ${SESSIONS:-${HOME}/.pi/agent/sessions}:/sessions:ro
+      - ${OPENCODE:-${HOME}/.local/share/opencode}:/opencode:ro
+      - ${OCR_HOME:-${HOME}/.opencodereview}:/ocr:ro
+      # Bind-mount, not a named volume: this is the host CLI's own database dir,
+      # so `make index` on the host and the container share one index.
+      - ${DATA_DIR:-${HOME}/.local/share/pi-token-usage}:/data
+    environment:
+      # scratch has no /usr/share/zoneinfo; TZ must be set explicitly or every
+      # day bucket silently lands in UTC.
+      TZ: ${TZ:-UTC}
+      PI_SESSIONS_DIR: /sessions
+      OPENCODE_DB: /opencode/opencode.db
+      OCR_SESSIONS_DIR: /ocr/sessions
+      PITOKENS_DB: /data/index.db
+      PITOKENS_ADDR: 0.0.0.0:7777
+    read_only: true
+    tmpfs:
+      - /tmp

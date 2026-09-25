@@ -18,6 +18,13 @@ make index          # parse sessions into ~/.local/share/pi-token-usage/index.db
 make run            # http://127.0.0.1:7777
 ```
 
+Or run it as a persistent container that comes back on every boot — see
+[Docker](#docker):
+
+```bash
+make docker-up
+```
+
 Or without the browser:
 
 ```bash
@@ -59,23 +66,35 @@ The provider name is read from the `provider` key of
 
 ## Docker
 
+The stack is defined in `docker-compose.yml` and runs as a persistent daemon:
+
 ```bash
-make docker-up      # http://127.0.0.1:7777
-make docker-logs
-make docker-down
+make docker-up      # build + start → http://127.0.0.1:7777
+make docker-logs    # follow logs
+make docker-down    # stop
 ```
 
-The image is a 16 MB `scratch` container. `make docker-up` mounts everything
-correctly and runs the container **as your host uid** (`RUNAS`), so owner-only
-source dirs like `~/.opencodereview/sessions` (0700) are readable without any
-ACL changes:
+**It starts on boot.** The service has `restart: unless-stopped` and the docker
+daemon is `enabled`, so the dashboard is back up after every reboot without a
+systemd unit — and stays down only if you explicitly `make docker-down` it.
+`make docker-ps` prints the live restart policy plus the daemon's boot state if
+you ever need to prove that.
+
+The image is a 16 MB `scratch` container. The compose file mounts everything
+unconditionally and runs the container **as your host uid** (`RUNAS`), so
+owner-only source dirs like `~/.opencodereview/sessions` (0700) are readable
+without any ACL changes:
 
 | Host | Container | Mode |
 |---|---|---|
 | `~/.pi/agent/sessions` | `/sessions` | read-only |
-| `~/.local/share/opencode` | `/opencode` | read-only (when present) |
-| `~/.opencodereview` | `/ocr` | read-only (when present) |
+| `~/.local/share/opencode` | `/opencode` | read-only |
+| `~/.opencodereview` | `/ocr` | read-only |
 | `~/.local/share/pi-token-usage` | `/data` | read-write bind |
+
+The mounts are unconditional because this runs on the host that owns the data —
+a missing source is a no-op to the indexer, not a mount error. The container is
+also `read_only: true` with a `/tmp` tmpfs.
 
 The DB is a bind-mount of the host CLI's own directory, not a named volume —
 a named volume would carry the image's staged 65534 ownership and be
@@ -83,14 +102,23 @@ unwritable by the host uid. Sharing one database means `make index` on the
 host and the container see the same data (cross-path re-indexes are deduped
 by message id, not double-counted).
 
-Override anything:
+### Config
+
+`.env` holds the local values (paths, `TZ`, uid, port). The Makefile exports
+its own variables, which take precedence over `.env`, so both entry points work:
 
 ```bash
 make docker-up SESSIONS=/other/sessions PORT=8080 TZ=Europe/Berlin DATA_DIR=/other/dbdir RUNAS=1000:1000
+docker compose up -d          # uses .env, no make involved
 ```
 
-Other targets: `docker-reindex`, `docker-rebuild-index`, `docker-status`,
-`docker-shell CMD="report -by model"`, `docker-clean` (also deletes the database).
+`TZ` is not cosmetic — `scratch` has no zoneinfo, so a wrong or missing `TZ`
+shifts every daily bucket by hours. `PORT_BIND` defaults to `127.0.0.1`; set it
+to `0.0.0.0` to expose the dashboard beyond loopback.
+
+Other targets: `docker-build`, `docker-restart`, `docker-ps`, `docker-reindex`,
+`docker-rebuild-index`, `docker-status`, `docker-shell CMD="report -by model"`,
+and `docker-clean` (tears down the stack; the bind-mounted database is kept).
 
 ## How it works
 
