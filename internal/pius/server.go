@@ -20,6 +20,7 @@ type Server struct {
 	root        string
 	openCodeDB  string
 	ocrRoot     string
+	hermesDB    string
 	webFS       fs.FS
 	mu          sync.Mutex
 	indexing    bool
@@ -28,10 +29,10 @@ type Server struct {
 	refreshErr  string
 }
 
-// NewServer builds the HTTP server. openCodeDB and ocrRoot may be "" to
-// exclude those sources.
-func NewServer(s *Store, sessionsRoot, openCodeDB, ocrRoot string, web fs.FS) *Server {
-	return &Server{store: s, root: sessionsRoot, openCodeDB: openCodeDB, ocrRoot: ocrRoot, webFS: web}
+// NewServer builds the HTTP server. openCodeDB, ocrRoot and hermesDB may be ""
+// to exclude those sources.
+func NewServer(s *Store, sessionsRoot, openCodeDB, ocrRoot, hermesDB string, web fs.FS) *Server {
+	return &Server{store: s, root: sessionsRoot, openCodeDB: openCodeDB, ocrRoot: ocrRoot, hermesDB: hermesDB, webFS: web}
 }
 
 // Handler returns the routed mux.
@@ -147,7 +148,7 @@ func (srv *Server) maybeRefresh(ctx interface{ Done() <-chan struct{} }) (bool, 
 	defer func() { srv.indexing = false }()
 
 	start := time.Now()
-	res, changed, err := EnsureFresh(srv.store, srv.root, srv.openCodeDB, srv.ocrRoot)
+	res, changed, err := EnsureFresh(srv.store, srv.root, srv.openCodeDB, srv.ocrRoot, srv.hermesDB)
 	srv.lastRefresh = time.Now()
 	if err != nil {
 		srv.refreshErr = err.Error()
@@ -218,6 +219,7 @@ func (srv *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"sessions_root": srv.root,
 		"opencode_db":   srv.openCodeDB,
 		"ocr_root":      srv.ocrRoot,
+		"hermes_db":     srv.hermesDB,
 	})
 }
 
@@ -234,7 +236,7 @@ func (srv *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	srv.mu.Unlock()
 
 	start := time.Now()
-	res, err := Index(srv.store, IndexOptions{Root: srv.root, OpenCodeDB: srv.openCodeDB, OCRRoot: srv.ocrRoot, Full: full})
+	res, err := Index(srv.store, IndexOptions{Root: srv.root, OpenCodeDB: srv.openCodeDB, OCRRoot: srv.ocrRoot, HermesDB: srv.hermesDB, Full: full})
 	srv.mu.Lock()
 	srv.indexing = false
 	srv.lastRefresh = time.Now()

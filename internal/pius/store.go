@@ -90,6 +90,18 @@ CREATE TABLE IF NOT EXISTS facts (
   PRIMARY KEY (day, hour, project, model, provider, kind, source)
 );
 
+-- Baseline of cumulative counters already ingested from a source whose usage
+-- table only ever grows (hermes session_model_usage). One row per usage key,
+-- holding the last ingested per-field totals; each run inserts the growth.
+CREATE TABLE IF NOT EXISTS cum_state (
+  key         TEXT PRIMARY KEY,
+  input       INTEGER NOT NULL DEFAULT 0,
+  output      INTEGER NOT NULL DEFAULT 0,
+  cache_read  INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  reasoning   INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL

@@ -28,6 +28,7 @@ const (
 	envTZ       = "TZ"
 	envOpenCode = "OPENCODE_DB"
 	envOCR      = "OCR_SESSIONS_DIR"
+	envHermes   = "HERMES_DB"
 )
 
 func main() {
@@ -69,6 +70,7 @@ Commands:
                -full          wipe and re-parse everything
                -opencode PATH opencode db to ingest alongside pi
                -ocr PATH      ocr sessions dir to ingest alongside pi
+               -hermes PATH   hermes-agent state db to ingest alongside pi
   serve      Serve the web UI and API
   report     Print text tables (no browser needed)
                -by  day | month | project | model | provider | kind | source
@@ -82,6 +84,8 @@ Environment:
                                    'off' disables ingesting opencode tokens)
   OCR_SESSIONS_DIR  ocr sessions   (default ~/.opencodereview/sessions,
                                    'off' disables ingesting open-code-review tokens)
+  HERMES_DB         hermes-agent db (default ~/.hermes/state.db,
+                                   'off' disables ingesting hermes tokens)
   TZ                day bucketing   (default system local zone)
 `)
 }
@@ -93,6 +97,7 @@ type config struct {
 	tz       string
 	opencode string
 	ocr      string
+	hermes   string
 }
 
 func loadConfig() (config, error) {
@@ -113,6 +118,10 @@ func loadConfig() (config, error) {
 	c.ocr = firstNonEmpty(os.Getenv(envOCR), filepath.Join(home, ".opencodereview", "sessions"))
 	if strings.EqualFold(strings.TrimSpace(c.ocr), "off") {
 		c.ocr = ""
+	}
+	c.hermes = firstNonEmpty(os.Getenv(envHermes), filepath.Join(home, ".hermes", "state.db"))
+	if strings.EqualFold(strings.TrimSpace(c.hermes), "off") {
+		c.hermes = ""
 	}
 	return c, nil
 }
@@ -158,6 +167,7 @@ func cmdIndex(argv []string) int {
 	dbPath := fs.String("db", "", "database path")
 	openCode := fs.String("opencode", "", "opencode db path ('off' to disable)")
 	ocr := fs.String("ocr", "", "ocr sessions dir ('off' to disable)")
+	hermes := fs.String("hermes", "", "hermes-agent state db path ('off' to disable)")
 	_ = fs.Parse(argv)
 
 	cfg, err := loadConfig()
@@ -182,6 +192,12 @@ func cmdIndex(argv []string) int {
 			cfg.ocr = ""
 		}
 	}
+	if *hermes != "" {
+		cfg.hermes = strings.TrimSpace(*hermes)
+		if strings.EqualFold(cfg.hermes, "off") {
+			cfg.hermes = ""
+		}
+	}
 	applyZone(cfg.tz)
 
 	st, err := openDB(cfg.db)
@@ -197,7 +213,10 @@ func cmdIndex(argv []string) int {
 	if cfg.ocr != "" {
 		fmt.Printf("ocr sessions:   %s\n", cfg.ocr)
 	}
-	res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode, OCRRoot: cfg.ocr, Full: *full})
+	if cfg.hermes != "" {
+		fmt.Printf("hermes db:      %s\n", cfg.hermes)
+	}
+	res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode, OCRRoot: cfg.ocr, HermesDB: cfg.hermes, Full: *full})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -228,6 +247,7 @@ func cmdServe(argv []string) int {
 	dbPath := fs.String("db", "", "database path")
 	openCode := fs.String("opencode", "", "opencode db path ('off' to disable)")
 	ocr := fs.String("ocr", "", "ocr sessions dir ('off' to disable)")
+	hermes := fs.String("hermes", "", "hermes-agent state db path ('off' to disable)")
 	noIndex := fs.Bool("no-index", false, "skip the startup index")
 	_ = fs.Parse(argv)
 
@@ -256,6 +276,12 @@ func cmdServe(argv []string) int {
 			cfg.ocr = ""
 		}
 	}
+	if *hermes != "" {
+		cfg.hermes = strings.TrimSpace(*hermes)
+		if strings.EqualFold(cfg.hermes, "off") {
+			cfg.hermes = ""
+		}
+	}
 	applyZone(cfg.tz)
 
 	st, err := openDB(cfg.db)
@@ -266,7 +292,7 @@ func cmdServe(argv []string) int {
 
 	if !*noIndex {
 		fmt.Printf("cold index of %s ...\n", cfg.sessions)
-		res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode, OCRRoot: cfg.ocr})
+		res, err := pius.Index(st, pius.IndexOptions{Root: cfg.sessions, OpenCodeDB: cfg.opencode, OCRRoot: cfg.ocr, HermesDB: cfg.hermes})
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -274,7 +300,7 @@ func cmdServe(argv []string) int {
 			res.FilesScanned, res.FilesSkipped, res.ElapsedMS)
 	}
 
-	srv := pius.NewServer(st, cfg.sessions, cfg.opencode, cfg.ocr, pius.WebFS())
+	srv := pius.NewServer(st, cfg.sessions, cfg.opencode, cfg.ocr, cfg.hermes, pius.WebFS())
 	httpSrv := &http.Server{
 		Addr:              cfg.addr,
 		Handler:           srv.Handler(),

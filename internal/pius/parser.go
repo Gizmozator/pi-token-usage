@@ -17,6 +17,7 @@ const (
 	SourcePi       = "pi"
 	SourceOpenCode = "opencode"
 	SourceOCR      = "ocr"
+	SourceHermes   = "hermes"
 )
 
 // Kind classifies a session file by its position in the sessions tree.

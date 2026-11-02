@@ -64,8 +64,11 @@ type IndexOptions struct {
 	// OCRRoot is the open-code-review sessions directory
 	// (~/.opencodereview/sessions). Empty or missing means no ocr tokens.
 	OCRRoot string
-	Full    bool
-	OnDone  func(Progress)
+	// HermesDB is the path to hermes-agent's state.db (~/.hermes/state.db).
+	// Empty, "off", or a missing file means hermes contributes nothing.
+	HermesDB string
+	Full     bool
+	OnDone   func(Progress)
 }
 
 // parseFunc parses one session file from a byte offset. Both the pi envelope
@@ -128,6 +131,13 @@ func Index(s *Store, opts IndexOptions) (*IndexResult, error) {
 		if err := IndexOpenCode(s, opts.OpenCodeDB, res, opts.Full); err != nil {
 			// A locked or malformed opencode db must not kill the pi index.
 			log.Printf("opencode index skipped: %v", err)
+		}
+	}
+
+	if opts.HermesDB != "" {
+		if err := IndexHermes(s, opts.HermesDB, res, opts.Full); err != nil {
+			// Same rule as opencode: hermes problems never break the index.
+			log.Printf("hermes index skipped: %v", err)
 		}
 	}
 
@@ -220,21 +230,21 @@ func indexOneFile(s *Store, path string, parse parseFunc, full bool, res *IndexR
 // EnsureFresh performs a cheap staleness check and indexes only what changed.
 // A full stat pass over the whole tree costs a few milliseconds, so this is safe
 // to call on every page load.
-func EnsureFresh(s *Store, root, openCodeDB, ocrRoot string) (*IndexResult, bool, error) {
-	changed, err := anyChanged(s, root, openCodeDB, ocrRoot)
+func EnsureFresh(s *Store, root, openCodeDB, ocrRoot, hermesDB string) (*IndexResult, bool, error) {
+	changed, err := anyChanged(s, root, openCodeDB, ocrRoot, hermesDB)
 	if err != nil {
 		return nil, false, err
 	}
 	if !changed {
 		return &IndexResult{}, false, nil
 	}
-	r, err := Index(s, IndexOptions{Root: root, OpenCodeDB: openCodeDB, OCRRoot: ocrRoot})
+	r, err := Index(s, IndexOptions{Root: root, OpenCodeDB: openCodeDB, OCRRoot: ocrRoot, HermesDB: hermesDB})
 	return r, true, err
 }
 
 // anyChanged reports whether any file differs in size from its recorded state,
 // or the opencode database has unconsumed rows.
-func anyChanged(s *Store, root, openCodeDB, ocrRoot string) (bool, error) {
+func anyChanged(s *Store, root, openCodeDB, ocrRoot, hermesDB string) (bool, error) {
 	roots := []string{root}
 	if ocrRoot != "" {
 		roots = append(roots, ocrRoot)
@@ -259,7 +269,16 @@ func anyChanged(s *Store, root, openCodeDB, ocrRoot string) (bool, error) {
 		}
 	}
 	if openCodeDB != "" {
-		return openCodeChanged(s, openCodeDB)
+		ch, err := openCodeChanged(s, openCodeDB)
+		if err != nil {
+			return false, err
+		}
+		if ch {
+			return true, nil
+		}
+	}
+	if hermesDB != "" {
+		return hermesChanged(s, hermesDB)
 	}
 	return false, nil
 }
@@ -271,6 +290,7 @@ func fullReset(s *Store) error {
 		DELETE FROM files;
 		DELETE FROM sessions;
 		DELETE FROM facts;
+		DELETE FROM cum_state;
 		COMMIT;`)
 	return err
 }

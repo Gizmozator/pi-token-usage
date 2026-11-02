@@ -1,11 +1,11 @@
 # pi-token-usage
 
 Local dashboard for token usage by the [pi](https://pi.dev) coding agent — plus
-[opencode](https://opencode.ai) and
+[opencode](https://opencode.ai), [hermes-agent](https://hermes-agent.nousresearch.com) and
 [ocr](https://github.com/alibaba/open-code-review), whose tokens are indexed
 alongside pi's and can be filtered per source. Parses `~/.pi/agent/sessions`,
-opencode's SQLite db and ocr's session transcripts into one index and charts it
-per day / month / project / model / source.
+opencode's SQLite db, hermes-agent's state db and ocr's session transcripts into
+one index and charts it per day / month / project / model / source.
 
 Single static Go binary, Chart.js UI, no external services. All data stays on your
 machine and the server binds to loopback only.
@@ -30,7 +30,7 @@ Or without the browser:
 ```bash
 make report BY=project
 make report BY=month
-make report BY=source   # pi vs opencode
+make report BY=source   # pi vs opencode vs hermes vs ocr
 ```
 
 ## opencode tokens
@@ -41,6 +41,13 @@ messages from it read-only and folds them into the same `usage_events` table wit
 `source='opencode'` — the UI's **source** filter then shows pi only, opencode
 only, or both. Ingestion is incremental by `message.rowid` (opencode only
 appends), so re-runs cost milliseconds.
+
+opencode v2 moved storage from `session`/`message` to `session_v2`/`session_message`
+and migrated the v1 history into the new tables. The indexer detects which
+generation the db uses and reads only that pair — reading both would double-count
+the migrated overlap — and a generation switch under an existing index triggers a
+full re-ingest of the source so every message is counted exactly once. Both
+generations ingest as the same `opencode` source.
 
 - Override the path with `OPENCODE_DB=/path/to/opencode.db` or `-opencode PATH`
   on `index`/`serve`; `OPENCODE_DB=off` disables it.
@@ -63,6 +70,24 @@ The provider name is read from the `provider` key of
 - Override with `OCR_SESSIONS_DIR=/path` or `-ocr PATH` on `index`/`serve`;
   `OCR_SESSIONS_DIR=off` disables it.
 - A missing ocr directory is skipped silently — no ocr, no noise.
+
+## hermes-agent tokens
+
+hermes-agent keeps token accounting in `~/.hermes/state.db` (SQLite, WAL) as
+**cumulative** counters: `session_model_usage` holds one row per
+(session, model, billing, task) whose totals grow in place while the session
+lives. There is no append-only log to tail, so ingestion is delta-based: the last
+ingested per-field totals are kept in a `cum_state` table, and each run inserts
+the growth as one `source='hermes'` event stamped at the row's `last_seen`.
+Counters that shrink (session rewind) reset the baseline without emitting
+negative events.
+
+- Override the path with `HERMES_DB=/path/to/state.db` or `-hermes PATH` on
+  `index`/`serve`; `HERMES_DB=off` disables it.
+- A missing or locked hermes db is skipped with a log line — it never breaks
+  the pi index.
+- hermes sessions map onto the existing dimensions: `cwd` → project,
+  `parent_session_id` → subagent kind, `model`/`billing_provider` → model/provider.
 
 ## Docker
 
@@ -90,6 +115,7 @@ without any ACL changes:
 | `~/.pi/agent/sessions` | `/sessions` | read-only |
 | `~/.local/share/opencode` | `/opencode` | read-only |
 | `~/.opencodereview` | `/ocr` | read-only |
+| `~/.hermes` | `/hermes` | read-only |
 | `~/.local/share/pi-token-usage` | `/data` | read-write bind |
 
 The mounts are unconditional because this runs on the host that owns the data —
@@ -217,6 +243,9 @@ Environment:
 | `PI_SESSIONS_DIR` | `~/.pi/agent/sessions` | sessions root |
 | `PITOKENS_DB` | `~/.local/share/pi-token-usage/index.db` | database path |
 | `PITOKENS_ADDR` | `127.0.0.1:7777` | listen address |
+| `OPENCODE_DB` | `~/.local/share/opencode/opencode.db` | opencode db (`off` disables) |
+| `OCR_SESSIONS_DIR` | `~/.opencodereview/sessions` | ocr sessions (`off` disables) |
+| `HERMES_DB` | `~/.hermes/state.db` | hermes-agent state db (`off` disables) |
 | `TZ` | system local zone | day/hour bucketing |
 
 ## API

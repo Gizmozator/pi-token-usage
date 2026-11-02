@@ -31,6 +31,9 @@ services:
       - ${SESSIONS:-${HOME}/.pi/agent/sessions}:/sessions:ro
       - ${OPENCODE:-${HOME}/.local/share/opencode}:/opencode:ro
       - ${OCR_HOME:-${HOME}/.opencodereview}:/ocr:ro
+      # hermes-agent state dir: the indexer reads state.db (+ WAL sidecars)
+      # read-only; a missing dir is skipped by the indexer, not an error.
+      - ${HERMES_HOME:-${HOME}/.hermes}:/hermes:ro
       # Bind-mount, not a named volume: this is the host CLI's own database dir,
       # so `make index` on the host and the container share one index.
       - ${DATA_DIR:-${HOME}/.local/share/pi-token-usage}:/data
@@ -41,6 +44,7 @@ services:
       PI_SESSIONS_DIR: /sessions
       OPENCODE_DB: /opencode/opencode.db
       OCR_SESSIONS_DIR: /ocr/sessions
+      HERMES_DB: /hermes/state.db
       PITOKENS_DB: /data/index.db
       PITOKENS_ADDR: 0.0.0.0:7777
     read_only: true
