@@ -504,3 +504,17 @@ Since previous days are the interest, the default view should **not** be today:
   hour-of-day heatmap (needs `hour` in cube grain), per-project lifetime totals,
   "where did my tokens go" treemap-style breakdown.
 - Range picker with an **All time** option, since history is the point.
+
+---
+
+## Changelog
+
+### 2026-11-21 — web UI restyled with the rantaeskola.fi design system
+
+- Palette remapped to the house design system: navy base (#0b0f19), cyan
+  primary (#38bdf8), indigo secondary (#818cf8), emerald/amber/rose accents;
+  chart series, heatmap gradient, bar gradients and hero gradient re-tinted
+  to match.
+- `< host />` mono logo (cyan angle brackets) replaces the checker-square
+  mark; the brand and the browser tab title derive from the host the page is
+  served on (fallback "pi-tokens" on dev hosts) — no hardcoded domain.

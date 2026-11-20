@@ -9,21 +9,32 @@
  */
 'use strict';
 
+// House-style brand: the logo and tab title follow the host the page is served
+// on, so they track the deployment domain without hardcoding. Dev hosts
+// (localhost, bare IPs, IPv6) fall back to the project name.
+const BRAND_HOST = (() => {
+  const h = location.hostname;
+  if (!h || h === 'localhost' || h.includes(':') || /^\d+\.\d+\.\d+\.\d+$/.test(h)) return 'pi-tokens';
+  return h;
+})();
+document.getElementById('brandHost').textContent = BRAND_HOST;
+document.title = BRAND_HOST;
+
 const C = {
-  input:  '#2ee6f0',
-  output: '#ffc45c',
-  total:  '#a78bfa',
-  cache:  '#5d6f89',
-  green:  '#4ade9b',
-  pink:   '#ff7ab8',
-  blue:   '#60a5fa',
+  input:  '#38bdf8',
+  output: '#f59e0b',
+  total:  '#818cf8',
+  cache:  '#64748b',
+  green:  '#10b981',
+  pink:   '#f43f5e',
+  blue:   '#7dd3fc',
   grid:   'rgba(255,255,255,0.05)',
-  tick:   '#7f92ab',
+  tick:   '#94a3b8',
 };
 
 const SERIES = [
-  '#2ee6f0', '#a78bfa', '#ffc45c', '#4ade9b',
-  '#ff7ab8', '#60a5fa', '#f97316', '#c084fc',
+  '#38bdf8', '#818cf8', '#f59e0b', '#10b981',
+  '#f43f5e', '#2dd4bf', '#e879f9', '#fbbf24',
 ];
 
 Chart.defaults.color = C.tick;
@@ -174,7 +185,7 @@ function renderMain(rows) {
       label: 'new total',
       data: keys.map((k) => freshOf(agg.get(k))),
       borderColor: C.total,
-      backgroundColor: grad('mainChart', 'rgba(167,139,250,0.28)', 'rgba(167,139,250,0.01)'),
+      backgroundColor: grad('mainChart', 'rgba(129,140,248,0.28)', 'rgba(129,140,248,0.01)'),
       fill: true, borderWidth: 2.2, tension: 0.3, pointRadius: 0, pointHoverRadius: 4,
     },
     {
@@ -306,8 +317,8 @@ function renderStack(rows) {
     ds.push({
       label: 'other (' + rest.length + ')',
       data: other,
-      backgroundColor: 'rgba(93,111,137,0.35)',
-      borderColor: 'rgba(93,111,137,0.8)',
+      backgroundColor: 'rgba(100,116,139,0.35)',
+      borderColor: 'rgba(100,116,139,0.8)',
       borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, pointHoverRadius: 3,
     });
   }
@@ -355,7 +366,7 @@ function renderHours(rows) {
         label: 'new tokens',
         data: buckets,
         backgroundColor: buckets.map((_, i) =>
-          (i >= 0 && i < 6) ? 'rgba(167,139,250,0.65)' : 'rgba(46,230,240,0.6)'),
+          (i >= 0 && i < 6) ? 'rgba(129,140,248,0.65)' : 'rgba(56,189,248,0.6)'),
         borderRadius: 5,
         borderSkipped: false,
       }],
@@ -441,7 +452,7 @@ function renderHeatmap(rows) {
   const maxLog = Math.log(Math.max(...vals) + 1);
 
   ctx.font = '9.5px ui-monospace, monospace';
-  ctx.fillStyle = '#5d6f89';
+  ctx.fillStyle = '#64748b';
   const wd = ['Mon', '', 'Wed', '', 'Fri', '', 'Sun'];
   for (let r = 0; r < 7; r++) {
     if (wd[r]) ctx.fillText(wd[r], 0, top + r * (cell + gap) + cell - 3);
@@ -461,7 +472,7 @@ function renderHeatmap(rows) {
       if (v > 0) {
         const t = Math.log(v + 1) / maxLog;
         // cyan -> violet as intensity rises
-        const c1 = [46, 230, 240], c2 = [167, 139, 250];
+        const c1 = [56, 189, 248], c2 = [129, 140, 248];
         const mix = c1.map((a, i) => Math.round(a + (c2[i] - a) * t));
         ctx.fillStyle = `rgba(${mix[0]}, ${mix[1]}, ${mix[2]}, ${(0.22 + 0.78 * t).toFixed(3)})`;
       } else {
@@ -472,7 +483,7 @@ function renderHeatmap(rows) {
     }
   }
 
-  ctx.fillStyle = '#5d6f89';
+  ctx.fillStyle = '#64748b';
   let lastMonth = -1;
   for (let w = 0; w < weeks; w++) {
     const d = new Date(start.getTime() + (w * 7 - startOff) * 86400000);
@@ -502,8 +513,8 @@ function render() {
   renderHero(rows);
   renderMain(rows);
   renderStack(rows);
-  renderBars($('projBars'), sumBy(rows, (r) => r.p), 'linear-gradient(90deg,#2ee6f0,#0891b2)');
-  renderBars($('modelBars'), sumBy(rows, (r) => r.m || '(unknown)'), 'linear-gradient(90deg,#a78bfa,#7c3aed)');
+  renderBars($('projBars'), sumBy(rows, (r) => r.p), 'linear-gradient(90deg,#38bdf8,#818cf8)');
+  renderBars($('modelBars'), sumBy(rows, (r) => r.m || '(unknown)'), 'linear-gradient(90deg,#818cf8,#38bdf8)');
   renderHeatmap(rows);
   renderHours(rows);
   writeURL();
