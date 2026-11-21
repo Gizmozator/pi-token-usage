@@ -28,7 +28,15 @@ export IMAGE NAME SESSIONS OPENCODE OCR_HOME DATA_DIR PORT TZ RUNAS
 
 # ------------------------------------------------------------------ local
 
-build: ## build the static binary
+# Shared design system (base-styles repo). internal/pius/web/base.css is
+# vendored and committed; refresh with `make css`. go:embed needs it before build.
+BASE_STYLES_TAG ?= v1.0.0
+BASE_STYLES_URL := http://gitea.rantaeskola.fi/gizmoz/base-styles/raw/tag/$(BASE_STYLES_TAG)
+
+css: ## Fetch shared base.css from base-styles
+	curl -fsSL $(BASE_STYLES_URL)/base.css -o internal/pius/web/base.css
+
+build: css ## build the static binary
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BIN) ./cmd/pitokens
 
 test: ## run unit tests
@@ -105,6 +113,6 @@ help: ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: build test vet index index-full run report clean \
+.PHONY: css build test vet index index-full run report clean \
         docker-build docker-up docker-down docker-restart docker-logs docker-ps \
         docker-reindex docker-rebuild-index docker-status docker-clean docker-shell help
