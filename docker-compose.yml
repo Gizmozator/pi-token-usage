@@ -29,7 +29,7 @@ services:
       - "${PORT_BIND:-127.0.0.1}:${PORT:-7777}:7777"
     volumes:
       - ${SESSIONS:-${HOME}/.pi/agent/sessions}:/sessions:ro
-      - ${OPENCODE:-${HOME}/.local/share/opencode}:/opencode:ro
+      - ${OPENCODE_DATA:-${HOME}/.local/share/opencode}:/opencode:ro
       - ${OCR_HOME:-${HOME}/.opencodereview}:/ocr:ro
       # hermes-agent state dir: the indexer reads state.db (+ WAL sidecars)
       # read-only; a missing dir is skipped by the indexer, not an error.

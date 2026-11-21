@@ -1,7 +1,7 @@
 IMAGE    ?= pi-token-usage:latest
 NAME     ?= pitokens
 SESSIONS ?= $(HOME)/.pi/agent/sessions
-OPENCODE ?= $(HOME)/.local/share/opencode
+OPENCODE_DATA ?= $(HOME)/.local/share/opencode
 OCR_HOME ?= $(HOME)/.opencodereview
 # Run as the host user so the container can read owner-only data dirs
 # (~/.opencodereview/sessions is 0700) without any ACL changes.
@@ -22,7 +22,7 @@ SERVICE ?= pitokens
 # `docker compose` interpolates ${VARS} from the process environment, not from
 # make variables, so these have to be exported for the compose file to see them
 # (they override the committed .env, which is the bare-compose fallback).
-export IMAGE NAME SESSIONS OPENCODE OCR_HOME DATA_DIR PORT TZ RUNAS
+export IMAGE NAME SESSIONS OPENCODE_DATA OCR_HOME DATA_DIR PORT TZ RUNAS
 
 .DEFAULT_GOAL := help
 
