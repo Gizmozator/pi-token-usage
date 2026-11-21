@@ -10,6 +10,8 @@ one index and charts it per day / month / project / model / source.
 Single static Go binary, Chart.js UI, no external services. All data stays on your
 machine and the server binds to loopback only.
 
+![pi-token-usage dashboard — daily token usage with per-project and per-model breakdowns](docs/screenshots/dashboard-day.png)
+
 ## Quick start
 
 ```bash
